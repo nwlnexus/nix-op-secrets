@@ -96,6 +96,10 @@ in {
       || { echo "FAIL: test-field not in manifest"; exit 1; }
     jq -e '.["test-ssh"]' "$MANIFEST" >/dev/null \
       || { echo "FAIL: test-ssh not in manifest"; exit 1; }
+    jq -e '.["test-doc"]' "$MANIFEST" >/dev/null \
+      || { echo "FAIL: test-doc not in manifest"; exit 1; }
+    jq -e '.["test-template"]' "$MANIFEST" >/dev/null \
+      || { echo "FAIL: test-template not in manifest"; exit 1; }
 
     echo "All integration tests passed"
     touch $out
