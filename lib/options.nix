@@ -5,7 +5,7 @@ lib.types.submodule {
     type = lib.mkOption {
       type    = lib.types.enum [ "field" "document" "sshKey" ];
       default = "field";
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         The 1Password item type. Determines which `op` CLI command fetches the secret.
         - `field`: reads a single text/concealed field via `op read`
         - `document`: retrieves a file stored as a 1Password Document via `op document get`
@@ -18,7 +18,7 @@ lib.types.submodule {
     source = lib.mkOption {
       type    = lib.types.nullOr lib.types.str;
       default = null;
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         1Password URI for the secret. Format depends on type:
         - `field`: `op://vault/item/field`
         - `sshKey`: `op://vault/item` — no field segment; the module derives
@@ -32,21 +32,21 @@ lib.types.submodule {
     vault = lib.mkOption {
       type    = lib.types.nullOr lib.types.str;
       default = null;
-      description = lib.mdDoc "1Password vault name. Required for `document` type only.";
+      description = lib.mdDoc or (x: x) "1Password vault name. Required for `document` type only.";
       example = "Work";
     };
 
     item = lib.mkOption {
       type    = lib.types.nullOr lib.types.str;
       default = null;
-      description = lib.mdDoc "1Password item name. Required for `document` type only.";
+      description = lib.mdDoc or (x: x) "1Password item name. Required for `document` type only.";
       example = "Corp Root CA";
     };
 
     template = lib.mkOption {
       type    = lib.types.nullOr lib.types.path;
       default = null;
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         Nix store path to an `op inject` template file containing `op://` references.
         When set, `op inject` is used instead of the `type` dispatch. Mutually exclusive
         with `source`. Templates must contain only `op://` URIs — the Nix store is
@@ -57,7 +57,7 @@ lib.types.submodule {
 
     dest = lib.mkOption {
       type    = lib.types.str;
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         Absolute path where the secret will be written. Must start with `/`.
         Do not use `~/` — use `config.home.homeDirectory` in Home Manager configs.
       '';
@@ -67,7 +67,7 @@ lib.types.submodule {
     mode = lib.mkOption {
       type    = lib.types.str;
       default = "0600";
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         File permission mode (chmod format). Ignored for the private key of `sshKey`
         type — that is always forced to `0600`.
       '';
@@ -77,7 +77,7 @@ lib.types.submodule {
     writePublicKey = lib.mkOption {
       type    = lib.types.bool;
       default = false;
-      description = lib.mdDoc ''
+      description = lib.mdDoc or (x: x) ''
         `sshKey` type only. When true, also writes the public key to `dest + ".pub"`
         at mode `0644`. The public key is in `authorized_keys` format.
       '';

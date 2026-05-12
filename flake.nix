@@ -17,6 +17,22 @@
       in import ./tests/default.nix { inherit pkgs lib; }
     );
 
+    packages = forAllSystems (system:
+      let
+        evalPkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+        hmOpts = (lib.evalModules {
+          modules = [
+            (import ./modules/hm.nix)
+            { _module.args = { pkgs = evalPkgs; }; _module.check = false; }
+          ];
+        }).options;
+        optionsDoc = evalPkgs.nixosOptionsDoc { options = hmOpts.op-secrets; };
+      in {
+        docs    = optionsDoc.optionsCommonMark;
+        default = evalPkgs._1password-cli;
+      }
+    );
+
     devShells = forAllSystems (system:
       let pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
       in {
