@@ -91,6 +91,19 @@ in pkgs.writeShellScript "op-secrets-activate" ''
     fi
   }
 
+  run_op_inject() {
+    # inject writes to --output path; needs umask in the child process
+    local template_path="$1" dest_tmp="$2"
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" \
+        --preserve-env=OP_SERVICE_ACCOUNT_TOKEN \
+        sh -c 'umask 077; exec "$0" "''${@}"' \
+        "$OP" "''${OP_ARGS[@]}" inject -i "$template_path" -o "$dest_tmp"
+    else
+      "$OP" "''${OP_ARGS[@]}" inject -i "$template_path" -o "$dest_tmp"
+    fi
+  }
+
   # ── Auth ─────────────────────────────────────────────────────────────────────
   if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
     : # token in env — op picks it up natively
@@ -100,6 +113,10 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   elif run_op whoami &>/dev/null; then
     : # already authenticated
   else
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      echo "op-secrets: system activation requires a service account token — set OP_SERVICE_ACCOUNT_TOKEN or serviceAccountTokenFile" >&2
+      exit 1
+    fi
     echo "op-secrets: not authenticated — running op signin" >&2
     echo "op-secrets: NOTE: interactive signin requires a TTY; use OP_SERVICE_ACCOUNT_TOKEN for non-interactive contexts" >&2
     "$OP" signin "''${OP_ARGS[@]}" || {
@@ -123,7 +140,7 @@ in pkgs.writeShellScript "op-secrets-activate" ''
     case "$eff_type" in
       template)
         # op inject: template path is a Nix store path (world-readable skeleton only)
-        run_op inject -i "$template" -o "$dest_tmp"
+        run_op_inject "$template" "$dest_tmp"
         mv "$dest_tmp" "$dest"
         if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
           chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
