@@ -39,12 +39,24 @@ let
     lib.mapAttrsToList mkSecretCommand cfg.secrets
   );
 
-  secretNames = lib.concatStringsSep "\n" (lib.attrNames cfg.secrets);
+  secretNames = lib.concatStringsSep "\n" (
+    lib.concatMap (name:
+      let secret = cfg.secrets.${name};
+      in if secret.type == "sshKey" && secret.writePublicKey
+         then [ name "${name}__pub" ]
+         else [ name ]
+    ) (lib.attrNames cfg.secrets)
+  );
 
   manifestJqArgs = lib.concatStringsSep " \\\n    " (
-    lib.mapAttrsToList (name: secret:
-      "--arg ${lib.escapeShellArg name} ${lib.escapeShellArg secret.dest}"
-    ) cfg.secrets
+    lib.concatMap (name:
+      let secret = cfg.secrets.${name};
+          base = "--arg ${lib.escapeShellArg name} ${lib.escapeShellArg secret.dest}";
+          pubEntry = if secret.type == "sshKey" && secret.writePublicKey
+                     then [ base "--arg ${lib.escapeShellArg "${name}__pub"} ${lib.escapeShellArg "${secret.dest}.pub"}" ]
+                     else [ base ];
+      in pubEntry
+    ) (lib.attrNames cfg.secrets)
   );
 
 in pkgs.writeShellScript "op-secrets-activate" ''
@@ -223,9 +235,16 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   ${secretCommands}
 
   # ── Write manifest only on full success ───────────────────────────────────
-  mkdir -p "$MANIFEST_DIR"
-  ${pkgs.jq}/bin/jq -n '$ARGS.named' \
-    ${manifestJqArgs} \
-    > "$MANIFEST"
+  if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+    sudo -u "$ACTIVATION_USER" mkdir -p "$MANIFEST_DIR"
+    ${pkgs.jq}/bin/jq -n '$ARGS.named' \
+      ${manifestJqArgs} \
+      | sudo -u "$ACTIVATION_USER" tee "$MANIFEST" > /dev/null
+  else
+    mkdir -p "$MANIFEST_DIR"
+    ${pkgs.jq}/bin/jq -n '$ARGS.named' \
+      ${manifestJqArgs} \
+      > "$MANIFEST"
+  fi
   echo "op-secrets: activation complete"
 ''
