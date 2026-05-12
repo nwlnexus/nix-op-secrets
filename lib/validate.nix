@@ -32,8 +32,7 @@ lib.concatMap
         assertion =
           cfg.type != "sshKey"
           || cfg.source == null
-          || (let parts = lib.splitString "/"
-                (lib.removePrefix "op://" (lib.removePrefix "op://" cfg.source));
+          || (let parts = lib.splitString "/" (lib.removePrefix "op://" cfg.source);
               in builtins.length parts == 2);
         message = "${pfx}: 'source' for sshKey must be 'op://vault/item' (no field segment)";
       }
