@@ -17,9 +17,13 @@
       in import ./tests/default.nix { inherit pkgs lib; }
     );
 
-    packages = forAllSystems (system:
+    devShells = forAllSystems (system:
       let pkgs = nixpkgs.legacyPackages.${system};
-      in { default = pkgs._1password-cli; }
+      in {
+        default = pkgs.mkShell {
+          packages = [ pkgs._1password-cli ];
+        };
+      }
     );
   };
 }
