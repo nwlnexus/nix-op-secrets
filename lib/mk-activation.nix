@@ -67,13 +67,37 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   OP_ARGS=()
   [[ -n "$ACCOUNT" ]] && OP_ARGS+=(--account "$ACCOUNT")
 
+  # ── Helpers ──────────────────────────────────────────────────────────────────
+  # Defined before the auth block so run_op can be used in the whoami probe.
+  run_op() {
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" --preserve-env=OP_SERVICE_ACCOUNT_TOKEN -- "$OP" "''${OP_ARGS[@]}" "$@"
+    else
+      "$OP" "''${OP_ARGS[@]}" "$@"
+    fi
+  }
+
+  run_op_document() {
+    # document get writes to --output path; needs umask in the child process
+    local item="$1" vault="$2" dest_tmp="$3"
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      # Pass OP as $0 and all args positionally to avoid injection via sh -c string interpolation
+      sudo -u "$ACTIVATION_USER" \
+        --preserve-env=OP_SERVICE_ACCOUNT_TOKEN \
+        sh -c 'umask 077; exec "$0" "''${@}"' \
+        "$OP" "''${OP_ARGS[@]}" document get "$item" --vault "$vault" --output "$dest_tmp"
+    else
+      "$OP" "''${OP_ARGS[@]}" document get "$item" --vault "$vault" --output "$dest_tmp"
+    fi
+  }
+
   # ── Auth ─────────────────────────────────────────────────────────────────────
   if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
     : # token in env — op picks it up natively
   elif [[ -n "$SERVICE_ACCOUNT_TOKEN_FILE" && -f "$SERVICE_ACCOUNT_TOKEN_FILE" ]]; then
     OP_SERVICE_ACCOUNT_TOKEN="$(cat "$SERVICE_ACCOUNT_TOKEN_FILE")"
     export OP_SERVICE_ACCOUNT_TOKEN
-  elif "$OP" whoami "''${OP_ARGS[@]}" &>/dev/null; then
+  elif run_op whoami &>/dev/null; then
     : # already authenticated
   else
     echo "op-secrets: not authenticated — running op signin" >&2
@@ -84,45 +108,34 @@ in pkgs.writeShellScript "op-secrets-activate" ''
     }
   fi
 
-  # ── Helpers ──────────────────────────────────────────────────────────────────
-  run_op() {
-    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
-      sudo -u "$ACTIVATION_USER" -- "$OP" "''${OP_ARGS[@]}" "$@"
-    else
-      "$OP" "''${OP_ARGS[@]}" "$@"
-    fi
-  }
-
-  run_op_document() {
-    # document get writes to --output path; needs umask in the child process
-    local item="$1" vault="$2" dest_tmp="$3"
-    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
-      # Preserve umask across sudo boundary by wrapping in sh -c
-      sudo -u "$ACTIVATION_USER" sh -c \
-        "umask 077; ${lib.escapeShellArg op} ''${OP_ARGS[*]+''${OP_ARGS[*]}} document get \"$item\" --vault \"$vault\" --output \"$dest_tmp\""
-    else
-      "$OP" "''${OP_ARGS[@]}" document get "$item" --vault "$vault" --output "$dest_tmp"
-    fi
-  }
-
   # ── Secret handlers ──────────────────────────────────────────────────────────
   fetch_secret() {
     local name="$1" eff_type="$2" source="$3" vault="$4" item="$5" \
           template="$6" dest="$7" mode="$8" write_pub="$9"
     local dest_tmp="''${dest}.tmp"
 
-    mkdir -p "$(dirname "$dest")"
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" mkdir -p "$(dirname "$dest")"
+    else
+      mkdir -p "$(dirname "$dest")"
+    fi
 
     case "$eff_type" in
       template)
         # op inject: template path is a Nix store path (world-readable skeleton only)
         run_op inject -i "$template" -o "$dest_tmp"
         mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
         chmod "$mode" "$dest"
         ;;
       field)
         run_op read "$source" > "$dest_tmp"
         mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
         chmod "$mode" "$dest"
         ;;
       document)
@@ -137,10 +150,16 @@ in pkgs.writeShellScript "op-secrets-activate" ''
         # Field names are exact — lowercase with space; required by op CLI
         run_op read "''${source}/private key" > "$dest_tmp"
         mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
         chmod 0600 "$dest"  # forced; mode option is ignored for private keys
         if [[ "$write_pub" == "1" ]]; then
           run_op read "''${source}/public key" > "''${dest}.pub.tmp"
           mv "''${dest}.pub.tmp" "''${dest}.pub"
+          if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+            chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "''${dest}.pub"
+          fi
           chmod 0644 "''${dest}.pub"
         fi
         ;;
@@ -155,7 +174,12 @@ in pkgs.writeShellScript "op-secrets-activate" ''
 
   # ── Manifest ─────────────────────────────────────────────────────────────────
   if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
-    USER_HOME="$(sudo -u "$ACTIVATION_USER" sh -c 'echo $HOME')"
+    # dscl is macOS-only; fall back to getent on Linux
+    if command -v dscl &>/dev/null; then
+      USER_HOME=$(dscl . -read "/Users/$ACTIVATION_USER" NFSHomeDirectory | awk '{print $2}')
+    else
+      USER_HOME=$(getent passwd "$ACTIVATION_USER" | cut -d: -f6)
+    fi
   else
     USER_HOME="$HOME"
   fi
