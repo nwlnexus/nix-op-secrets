@@ -14,7 +14,7 @@ case "$CMD" in
     case "$URI" in
       # sshKey fields — exact casing required by op CLI
       *"/private key")
-        printf '-----BEGIN OPENSSH PRIVATE KEY-----\nmock-private-key\n-----END OPENSSH PRIVATE KEY-----\n'
+        printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nmock-private-key\n-----END OPENSSH PRIVATE KEY-----\n'
         ;;
       *"/public key")
         echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@mock"

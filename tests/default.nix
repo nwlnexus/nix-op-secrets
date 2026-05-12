@@ -71,7 +71,11 @@ in {
     check() {
       local label="$1" path="$2" expected_mode="$3"
       [[ -f "$path" ]] || { echo "FAIL: $label — file missing: $path"; exit 1; }
-      MODE=$(stat -f '%OLp' "$path" 2>/dev/null || stat -c '%a' "$path")
+      if MODE=$(stat -c '%a' "$path" 2>/dev/null); then
+        : # GNU stat (Linux)
+      else
+        MODE=$(stat -f '%Op' "$path" 2>/dev/null)
+      fi
       [[ "$MODE" == "$expected_mode" ]] \
         || { echo "FAIL: $label — mode is $MODE, expected $expected_mode"; exit 1; }
       echo "PASS: $label"
