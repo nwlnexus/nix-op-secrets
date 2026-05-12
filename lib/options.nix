@@ -52,7 +52,7 @@ lib.types.submodule {
         with `source`. Templates must contain only `op://` URIs — the Nix store is
         world-readable, so never embed literal secret values in template files.
       '';
-      example = "./secrets/infra.env.tpl";
+      example = ./secrets/infra.env.tpl;
     };
 
     dest = lib.mkOption {
@@ -81,6 +81,7 @@ lib.types.submodule {
         `sshKey` type only. When true, also writes the public key to `dest + ".pub"`
         at mode `0644`. The public key is in `authorized_keys` format.
       '';
+      example = true;
     };
   };
 }
