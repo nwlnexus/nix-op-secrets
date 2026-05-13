@@ -26,7 +26,7 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 KEY_DIR="$REPO_ROOT/tests/vm/keys"
 BASE_VM="nix-op-secrets-base"
 TEST_VM="nix-op-secrets-test-$(date +%s)"
-SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── 1. Clone base VM ──────────────────────────────────────────────────────
 echo "==> Cloning '$BASE_VM' → '$TEST_VM'..."

@@ -72,8 +72,6 @@ autoinstall:
   ssh:
     install-server: true
     allow-pw: false
-    authorized-keys:
-      - "PUB_KEY_PLACEHOLDER"
   storage:
     layout:
       name: direct
@@ -82,6 +80,13 @@ autoinstall:
     - jq
     - git
   late-commands:
+    # Explicitly set up SSH authorized_keys via late-commands — more reliable
+    # than autoinstall's ssh.authorized-keys field.
+    - mkdir -p /target/home/nixtest/.ssh
+    - echo 'PUB_KEY_PLACEHOLDER' >> /target/home/nixtest/.ssh/authorized_keys
+    - chmod 700 /target/home/nixtest/.ssh
+    - chmod 600 /target/home/nixtest/.ssh/authorized_keys
+    - chown -R 1000:1000 /target/home/nixtest/.ssh
     - echo 'nixtest ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/nixtest
     - chmod 440 /target/etc/sudoers.d/nixtest
 YAML
@@ -93,9 +98,10 @@ sed -i '' "s|PUB_KEY_PLACEHOLDER|${PUB_KEY}|g" "$SEED_DIR/user-data"
 # meta-data is required by cloud-init but can be empty
 touch "$SEED_DIR/meta-data"
 
-# Create ISO with volume label "cidata" (required for NoCloud detection)
+# Create ISO with volume label "cidata" (required for Ubuntu NoCloud detection).
+# Use -iso-volume-name explicitly — -default-volume-name only sets HFS+ label.
 hdiutil makehybrid -o "$SEED_ISO" -joliet -iso \
-  -default-volume-name cidata "$SEED_DIR" 2>/dev/null
+  -iso-volume-name cidata -joliet-volume-name cidata "$SEED_DIR" 2>/dev/null
 rm -rf "$SEED_DIR"
 echo "    Seed ISO created at $SEED_ISO"
 
@@ -134,7 +140,7 @@ while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
 done
 echo "    VM IP: $VM_IP"
 
-SSH_BASE="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+SSH_BASE="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── Wait for Ubuntu autoinstall to complete and SSH to come up ────────────
 # Ubuntu autoinstall takes ~10 minutes. We poll until SSH is available
