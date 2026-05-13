@@ -118,6 +118,7 @@ check_mode "/home/nixtest/.local/secrets/doc.txt" "600"
 
 # Template output — must contain the resolved field value
 check_file    "/home/nixtest/.local/secrets/infra.env"
+check_mode    "/home/nixtest/.local/secrets/infra.env" "600"
 check_content "/home/nixtest/.local/secrets/infra.env" "test-field-value"
 
 # Manifest — all five entries (including __pub synthetic key for sshKey)
