@@ -99,9 +99,8 @@ sed -i '' "s|PUB_KEY_PLACEHOLDER|${PUB_KEY}|g" "$SEED_DIR/user-data"
 touch "$SEED_DIR/meta-data"
 
 # Create ISO with volume label "cidata" (required for Ubuntu NoCloud detection).
-# Use -iso-volume-name explicitly — -default-volume-name only sets HFS+ label.
 hdiutil makehybrid -o "$SEED_ISO" -joliet -iso \
-  -iso-volume-name cidata -joliet-volume-name cidata "$SEED_DIR" 2>/dev/null
+  -default-volume-name cidata "$SEED_DIR" 2>/dev/null
 rm -rf "$SEED_DIR"
 echo "    Seed ISO created at $SEED_ISO"
 
