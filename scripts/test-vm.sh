@@ -62,14 +62,38 @@ fi
 
 # ── Prereq: test vault ────────────────────────────────────────────────────
 if ! op vault get nix-op-secrets-test &>/dev/null; then
-  echo "The vault 'nix-op-secrets-test' does not exist in your 1Password account."
-  printf "Create it now? [y/N] "
+  echo ""
+  echo "The vault 'nix-op-secrets-test' is not accessible via your service account token."
+  echo ""
+  echo "This can mean one of two things:"
+  echo "  A) The vault does not exist yet."
+  echo "  B) The vault exists but your service account has not been granted access to it."
+  echo ""
+  echo "If (A) — create the vault with a human user account, then grant your service"
+  echo "         account access before re-running this script:"
+  echo ""
+  echo "           op vault create nix-op-secrets-test   # as a human user"
+  echo ""
+  echo "If (B) — skip vault creation and go straight to granting access."
+  echo ""
+  echo "Either way, grant the service account vault access via the 1Password web UI:"
+  echo "  1. Sign in at https://start.1password.com"
+  echo "  2. Go to Developer Tools → Service Accounts → <your service account>"
+  echo "  3. Under 'Vault Access', click 'Add vault' → 'nix-op-secrets-test'"
+  echo "     (Read & Write permissions required)"
+  echo ""
+  printf "Create the vault now with op CLI (choose only if it doesn't exist yet)? [y/N] "
   read -r REPLY
   if [[ "$REPLY" =~ ^[Yy]$ ]]; then
     op vault create nix-op-secrets-test
-    echo "Vault created."
+    echo ""
+    echo "Vault created. IMPORTANT: You must still grant your service account access to"
+    echo "this vault via the 1Password web UI before re-running this script:"
+    echo "  https://start.1password.com → Developer Tools → Service Accounts"
+    exit 1
   else
-    echo "ERROR: Please create the vault manually: op vault create nix-op-secrets-test" >&2
+    echo ""
+    echo "Re-run this script after granting your service account access to the vault." >&2
     exit 1
   fi
 fi
