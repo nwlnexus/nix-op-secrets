@@ -105,16 +105,19 @@ hdiutil makehybrid -o "$SEED_ISO" -joliet -iso \
 rm -rf "$SEED_DIR"
 echo "    Seed ISO created at $SEED_ISO"
 
-# ── Create VM (if it doesn't exist) ───────────────────────────────────────
+# ── Create VM ─────────────────────────────────────────────────────────────
+# If the VM exists but has no clean snapshot it's a partial/failed previous
+# run — stop and delete it so we start fresh.
 echo "==> Checking if base VM exists..."
-if ! prlctl list --all | grep -q "$BASE_VM"; then
-  echo "    Creating Parallels VM '$BASE_VM'..."
-  prlctl create "$BASE_VM" --ostype linux --distribution ubuntu --no-hdd
-  prlctl set "$BASE_VM" --cpus 2 --memsize 4096 --device-add hdd --size 30720
-  echo "    VM created"
-else
-  echo "    VM already exists — skipping creation"
+if prlctl list --all | grep -q "$BASE_VM"; then
+  echo "    VM exists but has no clean snapshot — removing for fresh start..."
+  prlctl stop "$BASE_VM" --kill 2>/dev/null || true
+  prlctl delete "$BASE_VM"
 fi
+echo "    Creating Parallels VM '$BASE_VM'..."
+prlctl create "$BASE_VM" --ostype linux --distribution ubuntu --no-hdd
+prlctl set "$BASE_VM" --cpus 2 --memsize 4096 --device-add hdd --size 30720
+echo "    VM created"
 
 # ── Attach ISOs and boot ───────────────────────────────────────────────────
 echo "==> Attaching Ubuntu ISO and seed ISO, starting VM..."
