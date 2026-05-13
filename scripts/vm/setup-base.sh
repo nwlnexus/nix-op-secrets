@@ -132,8 +132,8 @@ fi
 prlctl start "$BASE_VM"
 
 # ── Wait for DHCP IP ───────────────────────────────────────────────────────
-echo "==> Waiting for VM to get a DHCP IP (up to 120s)..."
-DEADLINE=$(( $(date +%s) + 120 ))
+echo "==> Waiting for VM to get a DHCP IP (up to 300s)..."
+DEADLINE=$(( $(date +%s) + 300 ))
 VM_IP=""
 while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
   if [[ "$(date +%s)" -ge "$DEADLINE" ]]; then
