@@ -121,16 +121,44 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
    prlctl start "nix-op-secrets-base"
    ```
 
-3. **Unattended NixOS install via `prlctl exec`** — The NixOS live ISO runs as root with no password. Rather than relying on SSH into the live environment (which requires key pre-injection that the live ISO doesn't support), `prlctl exec` is used to run commands in the VM guest agent directly:
+3. **Build a custom installer ISO with the SSH key baked in** — The stock NixOS live ISO does not include the Parallels Tools guest agent (that is only installed by `hardware.parallels.enable` on the final system), so `prlctl exec` is not available during the install. Instead, `setup-base.sh` uses `nix build` on the host to produce a custom NixOS installer ISO that has SSH enabled and the generated public key pre-authorised for root login:
 
    ```bash
-   # Wait for guest agent to come up
-   until prlctl exec "nix-op-secrets-base" -- echo ready 2>/dev/null; do
-     sleep 5
-   done
+   # Build the custom installer ISO on the host
+   # nixos-generators is available in nixpkgs
+   INSTALLER_ISO=$(nix build --no-link --print-out-paths \
+     --impure \
+     --expr "
+       let
+         pkgs = import <nixpkgs> {};
+         lib  = pkgs.lib;
+       in (pkgs.nixos {
+         imports = [ \"\${<nixpkgs>}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix\" ];
+         services.openssh.enable = true;
+         services.openssh.settings.PermitRootLogin = \"yes\";
+         users.users.root.openssh.authorizedKeys.keys = [ \"$PUB_KEY\" ];
+       }).config.system.build.isoImage
+     " 2>/dev/null)/iso/*.iso
+   ```
 
-   # Partition and format
-   prlctl exec "nix-op-secrets-base" -- bash -c "
+   This produces an ISO (~800MB) that is identical to the upstream minimal ISO except for the authorised SSH key. Building it takes ~2 minutes on first run; subsequent runs are instant because the Nix store caches the derivation (only the key changes between setups, so the derivation is keyed by `$PUB_KEY`).
+
+4. **Boot custom ISO and install via SSH**
+
+   ```bash
+   prlctl set "nix-op-secrets-base" \
+     --device-set cdrom0 --image "$INSTALLER_ISO" --connect
+   prlctl start "nix-op-secrets-base"
+
+   # Get VM IP via Parallels UI or DHCP lease — poll until sshd answers
+   VM_IP=$(prlctl list "nix-op-secrets-base" -o ip --no-header | tr -d ' ')
+   SSH_INSTALL="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$VM_IP"
+
+   until $SSH_INSTALL true 2>/dev/null; do printf '.'; sleep 5; done
+
+   # Partition, install, reboot
+   $SSH_INSTALL bash -s <<'INSTALL'
+     set -euo pipefail
      parted /dev/sda -- mklabel gpt
      parted /dev/sda -- mkpart primary 512MB 100%
      parted /dev/sda -- mkpart ESP fat32 1MB 512MB
@@ -140,22 +168,17 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
      mount /dev/disk/by-label/nixos /mnt
      mkdir -p /mnt/boot
      mount -o umask=077 /dev/disk/by-label/boot /mnt/boot
-   "
-
-   # Write base config (with the generated public key baked in)
-   CONFIG=$(sed "s|__VM_KEY_PUB__|$PUB_KEY|g" \
-     "$REPO_ROOT/tests/vm/nixos-base.nix")
-   prlctl exec "nix-op-secrets-base" -- bash -c "
      nixos-generate-config --root /mnt
-     cat > /mnt/etc/nixos/configuration.nix <<'NIXEOF'
-   $CONFIG
-   NIXEOF
-     nixos-install --no-root-passwd
-     reboot
-   "
+   INSTALL
+
+   # Copy base config — substituting the public key placeholder
+   sed "s|__VM_KEY_PUB__|$PUB_KEY|g" "$REPO_ROOT/tests/vm/nixos-base.nix" \
+     | $SSH_INSTALL "cat > /mnt/etc/nixos/configuration.nix"
+
+   $SSH_INSTALL "nixos-install --no-root-passwd && reboot" || true
    ```
 
-   `tests/vm/nixos-base.nix` contains a `__VM_KEY_PUB__` placeholder that `setup-base.sh` substitutes with the actual public key before writing.
+   Injecting the key via SCP/SSH (rather than shell variable substitution into a heredoc) avoids quoting hazards entirely.
 
 4. **`tests/vm/nixos-base.nix`** — committed NixOS config template for the base VM:
    - SSH enabled, port 22
@@ -265,8 +288,12 @@ ssh $SSH_OPTS nixtest@"$VM_IP" \
 ```bash
 ssh $SSH_OPTS nixtest@"$VM_IP" \
   "sudo nixos-rebuild switch \
-     --flake /media/psf/nix-op-secrets/tests/vm#test-vm 2>&1"
+     --flake /media/psf/nix-op-secrets/tests/vm#test-vm \
+     --override-input op-secrets path:/media/psf/nix-op-secrets \
+     --no-write-lock-file 2>&1"
 ```
+
+`--override-input` substitutes the mounted repo path for `op-secrets` at test time. `--no-write-lock-file` prevents Nix from trying to update the committed `flake.lock`, which pins `op-secrets` to the GitHub URL as the canonical reference. This combination means: the lock file stays canonical (GitHub URL), but every test run exercises the actual local checkout.
 
 The stub flake's `configuration.nix` declares all four secret types (vault name is always `nix-op-secrets-test`):
 - `test-field`: `op://nix-op-secrets-test/nix-op-secrets-test-field/password` → `/home/nixtest/.local/secrets/field.txt` (mode 0600)
@@ -358,7 +385,7 @@ Handled by the `cleanup` trap registered at the start of the script. Always runs
 }
 ```
 
-**Note on `path:` flake input:** `op-secrets.url = "path:/media/psf/nix-op-secrets"` resolves to the mounted repo inside the VM. This path does not exist on the developer's host machine — the `flake.lock` should be generated inside the VM after the shared folder is mounted, or the implementer should handle locking carefully (e.g., commit a lock that uses the GitHub URL and override the URL at `nixos-rebuild` time with `--override-input`).
+**Note on `path:` flake input and `flake.lock`:** The committed `flake.lock` pins `op-secrets` using the GitHub URL (`github:nwlnexus/nix-op-secrets`) as the canonical reference — this is what `nix flake lock` will resolve to on the developer's host. At test time inside the VM, `nixos-rebuild` is called with `--override-input op-secrets path:/media/psf/nix-op-secrets --no-write-lock-file`, which substitutes the mounted checkout without modifying the committed lock file. The `op-secrets.url` in `flake.nix` can be set to the GitHub URL (not the `path:` URL); the override takes care of redirecting it at test time.
 
 ## macOS VM Guide (`docs/vm-testing-macos.md`)
 
