@@ -99,6 +99,8 @@ sed -i '' "s|PUB_KEY_PLACEHOLDER|${PUB_KEY}|g" "$SEED_DIR/user-data"
 touch "$SEED_DIR/meta-data"
 
 # Create ISO with volume label "cidata" (required for Ubuntu NoCloud detection).
+# hdiutil makehybrid refuses to overwrite an existing file — remove it first.
+rm -f "$SEED_ISO"
 hdiutil makehybrid -o "$SEED_ISO" -joliet -iso \
   -default-volume-name cidata "$SEED_DIR" 2>/dev/null
 rm -rf "$SEED_DIR"
