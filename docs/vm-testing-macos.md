@@ -155,6 +155,8 @@ ssh $SSH_OPTS nixtest@"$VM_IP" \
 
 ### 10. Run assertions
 
+> **Note:** macOS uses `stat -f '%OLp'` (BSD stat) rather than `stat -c '%a'` (GNU stat used in the Linux scripts). Use the commands below as-is.
+
 Same checks as the Linux automated path, executed over SSH:
 
 ```bash
@@ -183,8 +185,6 @@ done
 
 echo "All macOS VM integration tests passed"
 ```
-
-> **Note:** macOS uses `stat -f '%OLp'` (BSD stat) rather than `stat -c '%a'` (GNU stat used in the Linux scripts).
 
 ### 11. Cleanup
 
