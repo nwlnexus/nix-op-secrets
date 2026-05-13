@@ -138,7 +138,7 @@ while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
     echo "ERROR: Timed out waiting for VM IP" >&2; exit 1
   fi
   sleep 3
-  VM_IP=$(prlctl list "$BASE_VM" -o ip --no-header | tr -d ' ')
+  VM_IP=$(prlctl list "$BASE_VM" -o ip --no-header | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
 done
 echo "    VM IP: $VM_IP"
 
