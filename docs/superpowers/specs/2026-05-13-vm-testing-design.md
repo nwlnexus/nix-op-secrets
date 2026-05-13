@@ -126,7 +126,7 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
    ```bash
    # Build the custom installer ISO on the host
    # nixos-generators is available in nixpkgs
-   INSTALLER_ISO=$(nix build --no-link --print-out-paths \
+   _ISO_DIR=$(nix build --no-link --print-out-paths \
      --impure \
      --expr "
        let
@@ -138,7 +138,9 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
          services.openssh.settings.PermitRootLogin = \"yes\";
          users.users.root.openssh.authorizedKeys.keys = [ \"$PUB_KEY\" ];
        }).config.system.build.isoImage
-     " 2>/dev/null)/iso/*.iso
+     " 2>/dev/null)
+   # Glob must expand on a separate line — not inside $()
+   INSTALLER_ISO=$(echo "$_ISO_DIR"/iso/*.iso)
    ```
 
    This produces an ISO (~800MB) that is identical to the upstream minimal ISO except for the authorised SSH key. Building it takes ~2 minutes on first run; subsequent runs are instant because the Nix store caches the derivation (only the key changes between setups, so the derivation is keyed by `$PUB_KEY`).
@@ -150,8 +152,17 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
      --device-set cdrom0 --image "$INSTALLER_ISO" --connect
    prlctl start "nix-op-secrets-base"
 
-   # Get VM IP via Parallels UI or DHCP lease — poll until sshd answers
-   VM_IP=$(prlctl list "nix-op-secrets-base" -o ip --no-header | tr -d ' ')
+   # Get VM IP — poll prlctl until it returns a real address (not "-" or blank),
+   # with a 120 s timeout. Parallels reports DHCP-assigned IPs via its NAT/host-only
+   # network without requiring guest agent; the live ISO just needs a few seconds
+   # before DHCP settles.
+   DEADLINE=$(( $(date +%s) + 120 ))
+   VM_IP=""
+   while [ -z "$VM_IP" ] || [ "$VM_IP" = "-" ]; do
+     [ "$(date +%s)" -ge "$DEADLINE" ] && { echo "Timed out waiting for VM IP"; exit 1; }
+     sleep 3
+     VM_IP=$(prlctl list "nix-op-secrets-base" -o ip --no-header | tr -d ' ')
+   done
    SSH_INSTALL="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$VM_IP"
 
    until $SSH_INSTALL true 2>/dev/null; do printf '.'; sleep 5; done
@@ -180,8 +191,10 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
 
    Injecting the key via SCP/SSH (rather than shell variable substitution into a heredoc) avoids quoting hazards entirely.
 
-4. **`tests/vm/nixos-base.nix`** — committed NixOS config template for the base VM:
+5. **`tests/vm/nixos-base.nix`** — committed NixOS config template for the base VM:
    - SSH enabled, port 22
+   - `users.users.nixtest.isNormalUser = true` — required for SSH login as a non-root user
+   - `users.users.nixtest.home = "/home/nixtest"` — explicit home directory
    - `users.users.nixtest.openssh.authorizedKeys.keys = [ "__VM_KEY_PUB__" ]` (placeholder substituted by script)
    - `nix.settings.experimental-features = ["nix-command" "flakes"]`
    - `environment.systemPackages = [pkgs.git pkgs.jq]`
@@ -190,12 +203,12 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
    - `nixpkgs.config.allowUnfree = true` — required by `hardware.parallels`
    - `home-manager` not included at base VM level — it is wired via the test flake's NixOS module
 
-5. **Wait for SSH after reboot** — Poll `ssh -i tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nixtest@<ip>` until connected (60s timeout with progress dots).
+6. **Wait for SSH after reboot** — Poll `ssh -i tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nixtest@<ip>` until connected (60s timeout with progress dots).
 
-6. **Snapshot base state**
+7. **Snapshot base state**
    ```bash
    prlctl stop "nix-op-secrets-base"
-   prlctl snapshot create "nix-op-secrets-base" --name "clean"
+  prlctl snapshot create "nix-op-secrets-base" --name "clean"
    ```
 
 ## Test Run (`scripts/vm/run-tests.sh`)
@@ -234,8 +247,17 @@ prlctl set "$TEST_VM" \
   --shf-host-path "$REPO_ROOT" \
   --shf-host-ro off
 
-# prlctl exec requires guest agent (provided by hardware.parallels)
-VM_IP=$(prlctl exec "$TEST_VM" -- hostname -I | awk '{print $1}')
+# Poll prlctl for a real IP (not "-" or blank) — guest agent is available on
+# the installed system (hardware.parallels.enable = true), but Parallels also
+# reports DHCP-assigned IPs via NAT without requiring it. Use the same robust
+# loop as setup-base.sh for consistency.
+DEADLINE=$(( $(date +%s) + 60 ))
+VM_IP=""
+while [ -z "$VM_IP" ] || [ "$VM_IP" = "-" ]; do
+  [ "$(date +%s)" -ge "$DEADLINE" ] && { echo "Timed out waiting for VM IP"; exit 1; }
+  sleep 3
+  VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header | tr -d ' ')
+done
 
 # Poll SSH until ready
 SSH_OPTS="-i $REPO_ROOT/tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
@@ -345,8 +367,8 @@ Handled by the `cleanup` trap registered at the start of the script. Always runs
     nixpkgs.url    = "github:nixos/nixpkgs/nixos-25.05";
     hm.url         = "github:nix-community/home-manager/release-25.05";
     hm.inputs.nixpkgs.follows = "nixpkgs";
-    # op-secrets loaded from the mounted repo path at runtime — not pinned to GitHub
-    op-secrets.url = "path:/media/psf/nix-op-secrets";
+    # op-secrets pinned to GitHub; overridden at test time with --override-input
+    op-secrets.url = "github:nwlnexus/nix-op-secrets";
     op-secrets.inputs.nixpkgs.follows = "nixpkgs";
     darwin.url     = "github:nix-darwin/nix-darwin/nix-darwin-25.05";
     darwin.inputs.nixpkgs.follows = "nixpkgs";
@@ -435,8 +457,13 @@ A committed markdown guide covering every step a developer must follow manually:
      --shf-host-add nix-op-secrets \
      --shf-host-path "$(pwd)"
    # Repo available at /Volumes/nix-op-secrets inside macOS VM
+   # --override-input redirects op-secrets to the mounted checkout without
+   # modifying the committed flake.lock
    ssh $SSH_OPTS nixtest@<vm-ip> \
-     "sudo darwin-rebuild switch --flake /Volumes/nix-op-secrets/tests/vm#test-macos"
+     "sudo darwin-rebuild switch \
+       --flake /Volumes/nix-op-secrets/tests/vm#test-macos \
+       --override-input op-secrets path:/Volumes/nix-op-secrets \
+       --no-write-lock-file"
    ```
 
 10. **Assertions** (same checks as Linux, run over SSH)
@@ -454,7 +481,7 @@ A committed markdown guide covering every step a developer must follow manually:
 - `trap cleanup EXIT` is registered as the **first statement** in `run-tests.sh`, before any `op item create` — guarantees VM and 1Password item cleanup even on partial failure
 - Each prereq check prints a specific, actionable error message before exiting
 - SSH connectivity polling has a configurable timeout (default 60s) with progress dots
-- VM creation uses `prlctl exec` (guest agent) rather than live ISO SSH — avoids the key-injection bootstrapping problem
+- Base VM creation uses a custom installer ISO (SSH key baked in at build time) and SSH-driven install — no guest agent required during provisioning
 - All SSH calls use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` — ephemeral VMs rotate host keys per clone; this is safe for local trusted VMs
 
 ## Summary
@@ -462,9 +489,9 @@ A committed markdown guide covering every step a developer must follow manually:
 | Component | Location | Notes |
 |-----------|----------|-------|
 | Entry point | `scripts/test-vm.sh` | Sources `.env`, checks prereqs, calls subscripts |
-| Base VM setup | `scripts/vm/setup-base.sh` | Idempotent, ~10 min first run; uses `prlctl exec` for unattended install |
+| Base VM setup | `scripts/vm/setup-base.sh` | Idempotent, ~10 min first run; SSH-driven install via custom ISO with baked key |
 | Test runner | `scripts/vm/run-tests.sh` | ~3-5 min per run; trap ensures cleanup |
-| Stub flake | `tests/vm/flake.nix` | Linux + macOS outputs; `path:` input for mounted repo |
+| Stub flake | `tests/vm/flake.nix` | Linux + macOS outputs; GitHub URL pinned; `--override-input` redirects to mounted repo at test time |
 | NixOS config | `tests/vm/configuration.nix` | Declares all 4 secret types; vault fixed at `nix-op-secrets-test` |
 | Base VM NixOS | `tests/vm/nixos-base.nix` | SSH + flakes + Parallels Tools; `__VM_KEY_PUB__` placeholder |
 | Fixtures | `tests/vm/fixtures/` | `test-doc.txt`, `infra.env.tpl` — committed |
