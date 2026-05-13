@@ -6,7 +6,7 @@
     hm.url         = "github:nix-community/home-manager/release-25.05";
     hm.inputs.nixpkgs.follows = "nixpkgs";
     # op-secrets pinned to GitHub; overridden at test time with:
-    #   --override-input op-secrets path:/media/psf/nix-op-secrets
+    #   --override-input op-secrets path:/home/nixtest/nix-op-secrets
     #   --no-write-lock-file
     op-secrets.url = "github:nwlnexus/nix-op-secrets";
     op-secrets.inputs.nixpkgs.follows = "nixpkgs";
@@ -14,30 +14,25 @@
     darwin.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, hm, op-secrets, darwin, ... }: {
-    # Linux automated test target
-    nixosConfigurations.test-vm = nixpkgs.lib.nixosSystem {
-      system = "aarch64-linux";
+  outputs = { nixpkgs, hm, op-secrets, darwin, ... }: {
+    # Standalone Home Manager config — runs on Ubuntu in the test VM.
+    # The VM has Nix installed (Determinate Systems) but is not NixOS.
+    # Run with:
+    #   nix run github:nix-community/home-manager/release-25.05 -- switch \
+    #     --flake /home/nixtest/nix-op-secrets/tests/vm#nixtest \
+    #     --override-input op-secrets path:/home/nixtest/nix-op-secrets \
+    #     --no-write-lock-file
+    homeConfigurations.nixtest = hm.lib.homeManagerConfiguration {
+      pkgs    = nixpkgs.legacyPackages.aarch64-linux;
       modules = [
-        ./nixos-base.nix
-        hm.nixosModules.home-manager
-        {
-          # HM NixOS integration options (NixOS-level, not HM-level)
-          home-manager.useGlobalPkgs   = true;
-          home-manager.useUserPackages = true;
-          # Wire op-secrets HM module and stateVersion into the nixtest user
-          home-manager.users.nixtest = {
-            imports = [ op-secrets.hmModules.default ];
-            home.stateVersion = "25.05";
-          };
-        }
-        ./configuration.nix
+        op-secrets.hmModules.default
+        ./home.nix
       ];
     };
 
     # macOS manual test target — placeholder; see docs/vm-testing-macos.md
     darwinConfigurations.test-macos = darwin.lib.darwinSystem {
-      system = "aarch64-darwin";
+      system  = "aarch64-darwin";
       modules = [
         hm.darwinModules.home-manager
         op-secrets.darwinModules.default

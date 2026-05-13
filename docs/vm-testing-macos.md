@@ -8,8 +8,7 @@ inside a Parallels macOS VM. The Linux (NixOS) path is fully automated via
 
 | Requirement | Notes |
 |---|---|
-| Apple Silicon Mac | aarch64-darwin; building the NixOS installer ISO requires a Linux builder |
-| `nix.linux-builder.enable = true` | In your nix-darwin config — provides the `aarch64-linux` capacity needed for the ISO build. After `darwin-rebuild switch`, start it: `sudo launchctl kickstart -k system/org.nixos.linux-builder` |
+| Apple Silicon Mac | aarch64-darwin |
 | Parallels Desktop ≥26 | With `prlctl` on PATH |
 | macOS IPSW | Download via `softwareupdate --fetch-full-installer --full-installer-version <ver>` |
 | `op` CLI | `brew install 1password-cli` |

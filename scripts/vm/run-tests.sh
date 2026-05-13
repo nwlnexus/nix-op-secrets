@@ -33,13 +33,7 @@ echo "==> Cloning '$BASE_VM' → '$TEST_VM'..."
 prlctl clone "$BASE_VM" --name "$TEST_VM" --snapshot "clean"
 prlctl start "$TEST_VM"
 
-# ── 2. Mount repo + get IP ────────────────────────────────────────────────
-echo "==> Mounting repo as shared folder..."
-prlctl set "$TEST_VM" \
-  --shf-host-add nix-op-secrets \
-  --shf-host-path "$REPO_ROOT" \
-  --shf-host-ro off
-
+# ── 2. Get IP ─────────────────────────────────────────────────────────────
 echo -n "==> Waiting for VM IP (up to 60s)..."
 DEADLINE=$(( $(date +%s) + 60 ))
 VM_IP=""
@@ -58,7 +52,19 @@ echo " ready"
 
 SSH="ssh $SSH_OPTS nixtest@$VM_IP"
 
-# ── 3. Create test 1Password items ────────────────────────────────────────
+# ── 3. Sync repo into VM ──────────────────────────────────────────────────
+echo "==> Syncing repo into VM..."
+rsync -az --delete \
+  -e "ssh $SSH_OPTS" \
+  --exclude='.git' \
+  --exclude='.worktrees' \
+  --exclude='.cache' \
+  --exclude='tests/vm/keys' \
+  "$REPO_ROOT/" \
+  "nixtest@$VM_IP:/home/nixtest/nix-op-secrets/"
+echo "    Repo synced to /home/nixtest/nix-op-secrets"
+
+# ── 4. Create test 1Password items ────────────────────────────────────────
 echo "==> Creating test 1Password items in vault '$VAULT'..."
 FIELD_ID=$(op item create \
   --vault "$VAULT" \
@@ -82,19 +88,23 @@ DOC_ID=$(op document create "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" \
 echo "    Document item: $DOC_ID"
 # Template uses fixtures/infra.env.tpl which references the field item — no extra item needed
 
-# ── 4. Inject service account token into VM ───────────────────────────────
+# ── 5. Inject service account token into VM ───────────────────────────────
 echo "==> Injecting service account token into VM..."
-$SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null"
+$SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null && sudo chmod 600 /etc/op-secrets-test-token"
 
-# ── 5. Build and switch ───────────────────────────────────────────────────
-echo "==> Running nixos-rebuild switch (this takes several minutes)..."
-$SSH "sudo nixos-rebuild switch \
-  --flake /media/psf/nix-op-secrets/tests/vm#test-vm \
-  --override-input op-secrets path:/media/psf/nix-op-secrets \
-  --no-write-lock-file 2>&1"
+# ── 6. Run home-manager switch ────────────────────────────────────────────
+# Uses standalone home-manager (no NixOS required).
+# --override-input redirects op-secrets to the local checkout so we test
+# the current code without modifying flake.lock.
+echo "==> Running home-manager switch (this takes several minutes on first run)..."
+$SSH "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+  nix run github:nix-community/home-manager/release-25.05 -- switch \
+    --flake /home/nixtest/nix-op-secrets/tests/vm#nixtest \
+    --override-input op-secrets path:/home/nixtest/nix-op-secrets \
+    --no-write-lock-file 2>&1"
 echo "    Switch complete"
 
-# ── 6. Assertions ─────────────────────────────────────────────────────────
+# ── 7. Assertions ─────────────────────────────────────────────────────────
 echo "==> Running assertions..."
 
 fail()          { echo "FAIL: $1" >&2; exit 1; }
