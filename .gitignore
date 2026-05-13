@@ -2,3 +2,6 @@ result
 result-*
 .direnv/
 .worktrees/
+.env
+.cache/
+tests/vm/keys/
