@@ -28,18 +28,20 @@ fi
 
 # ── Build custom installer ISO ─────────────────────────────────────────────
 echo "==> Building custom NixOS installer ISO (this takes ~2 min on first run)..."
+# Requires an aarch64-linux builder (nix.linux-builder.enable = true in nix-darwin)
+# because some ISO derivations are not in the binary cache and must be built on Linux.
 _ISO_DIR=$(nix build --no-link --print-out-paths \
   --impure \
   --expr "
     let
-      pkgs = import <nixpkgs> {};
+      pkgs = import <nixpkgs> { system = \"aarch64-linux\"; };
     in (pkgs.nixos {
       imports = [ \"\${<nixpkgs>}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix\" ];
       services.openssh.enable = true;
       services.openssh.settings.PermitRootLogin = \"yes\";
       users.users.root.openssh.authorizedKeys.keys = [ \"$PUB_KEY\" ];
     }).config.system.build.isoImage
-  " 2>/dev/null)
+  ")
 # Glob must expand on a separate line — not inside $()
 INSTALLER_ISO=$(echo "$_ISO_DIR"/iso/*.iso)
 echo "    ISO ready: $INSTALLER_ISO"

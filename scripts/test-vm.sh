@@ -4,14 +4,43 @@
 # Usage: ./scripts/test-vm.sh
 #
 # Prerequisites:
+#   - Apple Silicon Mac with nix.linux-builder.enable = true in nix-darwin config
 #   - Parallels Desktop ≥26 with prlctl on PATH
 #   - 1Password CLI (op) on PATH
 #   - .env at repo root containing OP_SERVICE_ACCOUNT_TOKEN
 #   - The "nix-op-secrets-test" vault must exist in your 1Password account
+#     with your service account granted access to it
 set -euo pipefail
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+# When running from a worktree, also check the main repo root for .env
+MAIN_ROOT="$(dirname "$(git -C "$(dirname "$0")" rev-parse --git-common-dir)")"
 ENV_FILE="$REPO_ROOT/.env"
+if [[ ! -f "$ENV_FILE" && -f "$MAIN_ROOT/.env" ]]; then
+  ENV_FILE="$MAIN_ROOT/.env"
+fi
+
+# ── Prereq: aarch64-linux builder ────────────────────────────────────────
+# Building a NixOS ISO on Apple Silicon requires a Linux builder — some
+# derivations (e.g. GRUB configs, generated text files) are aarch64-linux
+# and are not in the binary cache.  nix-darwin's linux-builder provides this.
+if ! nix store info --store "ssh-ng://builder@linux-builder" &>/dev/null; then
+  echo "ERROR: No aarch64-linux builder available." >&2
+  echo "" >&2
+  echo "  Building a NixOS ISO on Apple Silicon (aarch64-darwin) requires a" >&2
+  echo "  Linux builder for derivations that are not in the binary cache." >&2
+  echo "" >&2
+  echo "  Enable the nix-darwin Linux builder by adding this to your" >&2
+  echo "  nix-darwin configuration and running 'darwin-rebuild switch':" >&2
+  echo "" >&2
+  echo "    nix.linux-builder.enable = true;" >&2
+  echo "" >&2
+  echo "  After rebuilding, start the builder service:" >&2
+  echo "    sudo launchctl kickstart -k system/org.nixos.linux-builder" >&2
+  echo "" >&2
+  echo "  Then re-run this script." >&2
+  exit 1
+fi
 
 # ── Prereq: prlctl ────────────────────────────────────────────────────────
 if ! command -v prlctl &>/dev/null; then
