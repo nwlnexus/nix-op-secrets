@@ -82,6 +82,27 @@ op-secrets = {
 
 See the [generated options reference](https://nwlnexus.github.io/nix-op-secrets/).
 
+## Testing
+
+End-to-end tests run inside a Parallels VM and exercise the module against
+a real 1Password service account:
+
+```bash
+# Prerequisites: macOS + Parallels Pro/Business, Nix on host, op CLI v2+,
+# a service account token in .env (see .env.sample).
+./scripts/test-vm.sh
+```
+
+- **Linux / Home-Manager** path (automated): builds an Ubuntu base VM,
+  installs Nix, runs `home-manager switch` against this flake, asserts that
+  all four secret types (field, sshKey, document, template) are written
+  correctly. See `scripts/` and `tests/vm/`.
+- **macOS / nix-darwin** path (manual, walked through step by step):
+  [`docs/vm-testing-macos.md`](docs/vm-testing-macos.md).
+
+The first base-VM build takes ~20 minutes; subsequent test cycles are ~3–5
+minutes via linked clones from a snapshot.
+
 ## Known Limitations
 
 - Files written during a partial first run (before any successful run) are not tracked in

@@ -1,0 +1,2 @@
+nix-op-secrets test document fixture
+This file is uploaded to 1Password as a Document item during VM integration tests.
