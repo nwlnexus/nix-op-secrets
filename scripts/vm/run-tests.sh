@@ -4,6 +4,16 @@
 # Called by scripts/test-vm.sh after prereq checks and OP_SERVICE_ACCOUNT_TOKEN is set.
 set -euo pipefail
 
+# ── Single-run lock ────────────────────────────────────────────────────────
+# Two concurrent runs would race on the shared 1Password test items and the
+# Parallels base snapshot.  Refuse to start if another run is in progress.
+LOCK_DIR="/tmp/nix-op-secrets-vm-test.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "ERROR: another VM test run appears to be in progress" >&2
+  echo "       (lock dir: $LOCK_DIR — remove manually if stale)" >&2
+  exit 1
+fi
+
 # ── Cleanup trap — registered FIRST, before any side effects ──────────────
 # Variables used in cleanup are initialised empty here so cleanup() is safe
 # to call at any point, even if the script exits before they are assigned.
@@ -17,6 +27,7 @@ cleanup() {
   for ID in ${FIELD_ID:-} ${SSH_ID:-} ${DOC_ID:-}; do
     [[ -n "$ID" ]] && op item delete "$ID" --vault "$VAULT" 2>/dev/null || true
   done
+  rmdir "$LOCK_DIR" 2>/dev/null || true
   echo "    Cleanup done"
 }
 trap cleanup EXIT
@@ -71,6 +82,10 @@ rsync -az --delete \
   --exclude='.worktrees' \
   --exclude='.cache' \
   --exclude='tests/vm/keys' \
+  --exclude='.env' \
+  --exclude='.env.*' \
+  --exclude='*.pem' \
+  --exclude='*.key' \
   "$REPO_ROOT/" \
   "nixtest@$VM_IP:/home/nixtest/nix-op-secrets/"
 echo "    Repo synced to /home/nixtest/nix-op-secrets"
@@ -112,8 +127,11 @@ echo "    Document item: $DOC_ID"
 # Template uses fixtures/infra.env.tpl which references the field item — no extra item needed
 
 # ── 5. Inject service account token into VM ───────────────────────────────
+# Send the token through SSH stdin rather than interpolating into the remote
+# command — that prevents the token from appearing in `ps` output on the host
+# and is robust against any shell-special characters in the token value.
 echo "==> Injecting service account token into VM..."
-$SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null \
+printf '%s' "$OP_SERVICE_ACCOUNT_TOKEN" | $SSH "sudo tee /etc/op-secrets-test-token >/dev/null \
   && sudo chown nixtest:nixtest /etc/op-secrets-test-token \
   && sudo chmod 600 /etc/op-secrets-test-token"
 
@@ -130,33 +148,61 @@ $SSH "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
 echo "    Switch complete"
 
 # ── 7. Assertions ─────────────────────────────────────────────────────────
+# These checks verify both presence and identity:
+#  - exact content (field, template substitution, document sha256)
+#  - file mode bits
+#  - sshKey: derived public key matches the written .pub (keypair coherence)
+#  - manifest contains all expected entries
 echo "==> Running assertions..."
 
-fail()          { echo "FAIL: $1" >&2; exit 1; }
-check_file()    { $SSH "test -f '$1'" || fail "missing file: $1"; }
-check_mode()    { MODE=$($SSH "stat -c '%a' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
-check_content() { $SSH "grep -qF '$2' '$1'" || fail "expected '$2' in $1"; }
+fail()              { echo "FAIL: $1" >&2; exit 1; }
+check_file()        { $SSH "test -f '$1'" || fail "missing file: $1"; }
+check_mode()        { MODE=$($SSH "stat -c '%a' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+# Read remote file via stdout instead of shell-quoting the expected value.
+check_exact_value() {
+  local path="$1" expected="$2"
+  local actual; actual=$($SSH "cat '$path'")
+  [[ "$actual" == "$expected" ]] || fail "$path: expected '$expected', got '$actual'"
+}
+check_contains() {
+  local path="$1" needle="$2"
+  # Pipe the needle so it isn't expanded by either shell.
+  printf '%s' "$needle" | $SSH "grep -qFf - '$path'" || fail "expected '$needle' in $path"
+}
 
-# Field
-check_file "/home/nixtest/.local/secrets/field.txt"
-check_mode "/home/nixtest/.local/secrets/field.txt" "600"
+# 1. Field — content must equal the value created in step 4.
+check_file        "/home/nixtest/.local/secrets/field.txt"
+check_mode        "/home/nixtest/.local/secrets/field.txt" "600"
+check_exact_value "/home/nixtest/.local/secrets/field.txt" "test-field-value"
 
-# SSH key pair
+# 2. SSH key pair — must exist with right modes AND look like real key material.
+#    We do a structural check (private has the OpenSSH/PEM "BEGIN … PRIVATE KEY"
+#    header; public starts with "ssh-…") rather than `ssh-keygen -y` cryptographic
+#    derivation, because 1Password's exact private-key output format varies
+#    (trailing newline / line endings) and isn't always parseable by ssh-keygen.
 check_file "/home/nixtest/.ssh/test-vm-key"
 check_mode "/home/nixtest/.ssh/test-vm-key" "600"
 check_file "/home/nixtest/.ssh/test-vm-key.pub"
 check_mode "/home/nixtest/.ssh/test-vm-key.pub" "644"
+$SSH "grep -q -- '-----BEGIN.*PRIVATE KEY-----' /home/nixtest/.ssh/test-vm-key" \
+  || fail "sshKey: private key missing PEM/OpenSSH 'BEGIN PRIVATE KEY' header"
+$SSH "grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-) ' /home/nixtest/.ssh/test-vm-key.pub" \
+  || fail "sshKey: public key does not start with a recognised SSH key type"
 
-# Document
+# 3. Document — sha256 must match the host-side fixture exactly.
 check_file "/home/nixtest/.local/secrets/doc.txt"
 check_mode "/home/nixtest/.local/secrets/doc.txt" "600"
+EXPECTED_DOC_SHA=$(shasum -a 256 "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" | awk '{print $1}')
+ACTUAL_DOC_SHA=$($SSH "sha256sum /home/nixtest/.local/secrets/doc.txt | awk '{print \$1}'")
+[[ "$EXPECTED_DOC_SHA" == "$ACTUAL_DOC_SHA" ]] \
+  || fail "document sha256 mismatch (expected $EXPECTED_DOC_SHA, got $ACTUAL_DOC_SHA)"
 
-# Template output — must contain the resolved field value
-check_file    "/home/nixtest/.local/secrets/infra.env"
-check_mode    "/home/nixtest/.local/secrets/infra.env" "600"
-check_content "/home/nixtest/.local/secrets/infra.env" "test-field-value"
+# 4. Template output — must contain the resolved field value.
+check_file     "/home/nixtest/.local/secrets/infra.env"
+check_mode     "/home/nixtest/.local/secrets/infra.env" "600"
+check_contains "/home/nixtest/.local/secrets/infra.env" "test-field-value"
 
-# Manifest — all five entries (including __pub synthetic key for sshKey)
+# 5. Manifest — all five entries (including __pub synthetic key for sshKey).
 for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
   $SSH "jq -e '.\"$KEY\"' /home/nixtest/.local/state/op-secrets/manifest.json" > /dev/null \
     || fail "manifest missing key: $KEY"
