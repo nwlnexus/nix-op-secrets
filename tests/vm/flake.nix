@@ -23,7 +23,11 @@
     #     --override-input op-secrets path:/home/nixtest/nix-op-secrets \
     #     --no-write-lock-file
     homeConfigurations.nixtest = hm.lib.homeManagerConfiguration {
-      pkgs    = nixpkgs.legacyPackages.aarch64-linux;
+      # op-secrets depends on 1password-cli (unfree); use a configured pkgs.
+      pkgs = import nixpkgs {
+        system = "aarch64-linux";
+        config.allowUnfree = true;
+      };
       modules = [
         op-secrets.hmModules.default
         ./home.nix

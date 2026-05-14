@@ -35,9 +35,10 @@
         dest  = "/home/nixtest/.local/secrets/doc.txt";
       };
 
-      # 4. Template — op inject using committed fixture
+      # 4. Template — op inject using committed fixture.
+      # When `template` is set, it takes precedence over `type` and the module
+      # invokes `op inject` instead of `op read`.
       test-template = {
-        type     = "template";
         template = ./fixtures/infra.env.tpl;
         dest     = "/home/nixtest/.local/secrets/infra.env";
       };

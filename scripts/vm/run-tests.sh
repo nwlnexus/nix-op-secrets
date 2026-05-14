@@ -29,18 +29,29 @@ TEST_VM="nix-op-secrets-test-$(date +%s)"
 SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── 1. Clone base VM ──────────────────────────────────────────────────────
-echo "==> Cloning '$BASE_VM' → '$TEST_VM'..."
-prlctl clone "$BASE_VM" --name "$TEST_VM" --snapshot "clean"
+# Use a linked clone from the 'clean' snapshot — much faster than a deep copy.
+# Parallels needs the snapshot UUID, which we extract from the JSON listing.
+echo "==> Cloning '$BASE_VM' → '$TEST_VM' (linked from snapshot 'clean')..."
+SNAPSHOT_ID=$(prlctl snapshot-list "$BASE_VM" -j 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(k for k,v in d.items() if v.get('name')=='clean'))")
+if [[ -z "$SNAPSHOT_ID" ]]; then
+  echo "ERROR: No 'clean' snapshot found on $BASE_VM" >&2
+  exit 1
+fi
+prlctl clone "$BASE_VM" --name "$TEST_VM" --linked -i "$SNAPSHOT_ID"
 prlctl start "$TEST_VM"
 
 # ── 2. Get IP ─────────────────────────────────────────────────────────────
-echo -n "==> Waiting for VM IP (up to 60s)..."
-DEADLINE=$(( $(date +%s) + 60 ))
+echo -n "==> Waiting for VM IP (up to 300s)..."
+DEADLINE=$(( $(date +%s) + 300 ))
 VM_IP=""
 while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
   [[ "$(date +%s)" -ge "$DEADLINE" ]] && { echo; echo "ERROR: Timed out waiting for VM IP" >&2; exit 1; }
   sleep 3
-  VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  # Disable pipefail temporarily — grep returns 1 with no match.
+  set +o pipefail
+  VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  set -o pipefail
 done
 echo " $VM_IP"
 
@@ -65,6 +76,18 @@ rsync -az --delete \
 echo "    Repo synced to /home/nixtest/nix-op-secrets"
 
 # ── 4. Create test 1Password items ────────────────────────────────────────
+# First, scrub any orphans from earlier interrupted runs so the new items'
+# titles resolve uniquely.  All test items are prefixed with
+# "nix-op-secrets-test-" and live in a dedicated test vault.
+echo "==> Scrubbing any orphan test items in vault '$VAULT'..."
+op item list --vault "$VAULT" --format json 2>/dev/null \
+  | jq -r '.[] | select(.title|startswith("nix-op-secrets-test-")) | .id' \
+  | while read -r ORPHAN_ID; do
+      [[ -z "$ORPHAN_ID" ]] && continue
+      echo "    deleting orphan $ORPHAN_ID"
+      op item delete "$ORPHAN_ID" --vault "$VAULT" 2>/dev/null || true
+    done
+
 echo "==> Creating test 1Password items in vault '$VAULT'..."
 FIELD_ID=$(op item create \
   --vault "$VAULT" \
@@ -90,7 +113,9 @@ echo "    Document item: $DOC_ID"
 
 # ── 5. Inject service account token into VM ───────────────────────────────
 echo "==> Injecting service account token into VM..."
-$SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null && sudo chmod 600 /etc/op-secrets-test-token"
+$SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null \
+  && sudo chown nixtest:nixtest /etc/op-secrets-test-token \
+  && sudo chmod 600 /etc/op-secrets-test-token"
 
 # ── 6. Run home-manager switch ────────────────────────────────────────────
 # Uses standalone home-manager (no NixOS required).
