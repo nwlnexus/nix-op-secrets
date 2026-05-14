@@ -1,13 +1,20 @@
 # macOS VM Testing Guide
 
+> **Use the fast test first.** Most regressions are caught by
+> `nix flake check` in ~5 seconds against a mocked `op` binary, on any
+> platform with Nix — no Parallels, no 1Password account, no VM. See
+> the README "Testing" section. Reach for this guide only when you need
+> to exercise the real `op` CLI and the real 1Password cloud (e.g. before
+> a release, or to verify a CLI/SDK upgrade).
+
 This guide covers the manual steps for testing the `nix-op-secrets` nix-darwin module
-inside a Parallels macOS VM. The Linux (NixOS) path is fully automated via
+inside a Parallels macOS VM. The Linux (Home-Manager on Ubuntu) path is fully automated via
 `./scripts/test-vm.sh`; macOS requires manual VM setup due to Apple's setup assistant.
 
 > **macOS host only.** Linux/Windows contributors cannot run the macOS path
 > (Parallels and `aarch64-darwin` are macOS-only). The Linux/Home-Manager path
 > is automated end-to-end via `./scripts/test-vm.sh` and is the supported
-> testing target for non-macOS contributors.
+> VM-level testing target for non-macOS contributors.
 
 ## Prerequisites
 

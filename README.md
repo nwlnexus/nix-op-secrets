@@ -84,8 +84,31 @@ See the [generated options reference](https://nwlnexus.github.io/nix-op-secrets/
 
 ## Testing
 
-End-to-end tests run inside a Parallels VM and exercise the module against
-a real 1Password service account:
+Two test layers — start with the fast one. The VM test is opt-in for
+real-cloud regressions only.
+
+### Fast hermetic test (`nix flake check`)
+
+Runs in ~5 s on any platform with Nix. Uses a mocked `op` binary; no
+1Password account, vault, or VM required. Exercises the actual activation
+script the module emits against all four secret types, with idempotent
+re-run and orphan-removal phases.
+
+```bash
+nix flake check
+# or, just the integration check:
+nix build .#checks.<system>.integration --no-link
+```
+
+This is the test loop for any change to `lib/`, `modules/`, or the
+activation script. It runs in CI on every PR.
+
+### VM integration test (opt-in real-API smoke)
+
+Drives a Parallels Ubuntu VM through cloud-init autoinstall, then runs
+`home-manager switch` against a real 1Password service account. Catches
+regressions in the real `op` CLI / cloud round-trip / activation
+lifecycle that the hermetic test can't see.
 
 ```bash
 # Prerequisites: macOS + Parallels Pro/Business, Nix on host, op CLI v2+,
@@ -93,15 +116,12 @@ a real 1Password service account:
 ./scripts/test-vm.sh
 ```
 
-- **Linux / Home-Manager** path (automated): builds an Ubuntu base VM,
-  installs Nix, runs `home-manager switch` against this flake, asserts that
-  all four secret types (field, sshKey, document, template) are written
-  correctly. See `scripts/` and `tests/vm/`.
-- **macOS / nix-darwin** path (manual, walked through step by step):
-  [`docs/vm-testing-macos.md`](docs/vm-testing-macos.md).
+- **Linux / Home-Manager** path (automated): see `scripts/` and `tests/vm/`.
+- **macOS / nix-darwin** path (manual): [`docs/vm-testing-macos.md`](docs/vm-testing-macos.md).
 
-The first base-VM build takes ~20 minutes; subsequent test cycles are ~3–5
-minutes via linked clones from a snapshot.
+First base-VM build takes ~20 min; subsequent cycles are ~3–5 min via
+linked clones. Macs only — for non-macOS contributors the fast test above
+is the supported flow.
 
 ## Known Limitations
 
