@@ -36,7 +36,21 @@ trap cleanup EXIT
 
 # ── Variables (after trap registration) ───────────────────────────────────
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-KEY_DIR="$REPO_ROOT/tests/vm/keys"
+# Resolve KEY_DIR the same way setup-base.sh does — prefer the XDG cache
+# location so the keypair persists across git worktree rotations.
+LEGACY_KEY_DIR="$REPO_ROOT/tests/vm/keys"
+DEFAULT_KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+if [[ -f "$LEGACY_KEY_DIR/vm_key" ]]; then
+  KEY_DIR="$LEGACY_KEY_DIR"
+else
+  KEY_DIR="$DEFAULT_KEY_DIR"
+fi
+if [[ ! -f "$KEY_DIR/vm_key" ]]; then
+  echo "ERROR: VM SSH key not found at $KEY_DIR/vm_key" >&2
+  echo "       Run scripts/vm/setup-base.sh first (or scripts/test-vm.sh)." >&2
+  exit 1
+fi
+
 BASE_VM="nix-op-secrets-base"
 TEST_VM="nix-op-secrets-test-$(date +%s)"
 KNOWN_HOSTS_DIR="$REPO_ROOT/.cache/known_hosts"
