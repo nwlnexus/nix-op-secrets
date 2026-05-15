@@ -45,10 +45,17 @@ if prlctl snapshot-list "$BASE_VM" -j 2>/dev/null | grep -q "\"name\": \"$SNAP_N
 fi
 
 # ── Download Ubuntu ISO ────────────────────────────────────────────────────
+# 1.5 GB download — interruption-prone on flaky links.  We use a `.partial`
+# file so a partial download isn't confused with a complete one; `curl -C -`
+# resumes from the byte offset, and we retry up to 5 times with backoff.
 mkdir -p "$CACHE_DIR"
 if [[ ! -f "$UBUNTU_ISO_CACHE" ]]; then
   echo "==> Downloading Ubuntu Server 24.04 LTS arm64 ISO (~1.5 GB)..."
-  curl -L --progress-bar -o "$UBUNTU_ISO_CACHE" "$UBUNTU_ISO_URL"
+  curl -L --fail --progress-bar \
+       --retry 5 --retry-delay 5 --retry-all-errors \
+       -C - \
+       -o "$UBUNTU_ISO_CACHE.partial" "$UBUNTU_ISO_URL"
+  mv "$UBUNTU_ISO_CACHE.partial" "$UBUNTU_ISO_CACHE"
   echo "    Downloaded to $UBUNTU_ISO_CACHE"
 else
   echo "==> Ubuntu ISO already cached at $UBUNTU_ISO_CACHE"
@@ -181,14 +188,28 @@ while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
 done
 echo "    VM IP: $VM_IP"
 
-SSH_BASE="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
+# ── SSH options ────────────────────────────────────────────────────────────
+# We use two SSH option sets:
+#   *_INSECURE — only for the initial "is sshd alive" reachability poll. The
+#                command we run is `true` (no payload), so an MITM gains
+#                nothing.  This call exists solely to detect that the VM has
+#                finished booting.
+#   $SSH_BASE  — pinned to the captured host key.  Used for every call that
+#                carries data: the Determinate Nix installer pipe and the
+#                Nix verification.  Refuses to connect if the host key
+#                changes (which would indicate a MITM or a re-imaged VM).
+KNOWN_HOSTS_DIR="$REPO_ROOT/.cache/known_hosts"
+KNOWN_HOSTS_FILE="$KNOWN_HOSTS_DIR/$BASE_VM"
+mkdir -p "$KNOWN_HOSTS_DIR"
+
+SSH_BASE_INSECURE="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── Wait for Ubuntu autoinstall to complete and SSH to come up ────────────
 # Ubuntu autoinstall takes ~10 minutes. We poll until SSH is available
 # on the installed system (it reboots after install completes).
 echo -n "==> Waiting for Ubuntu autoinstall + reboot + SSH (up to 20 min)..."
 DEADLINE=$(( $(date +%s) + 1200 ))
-until $SSH_BASE nixtest@"$VM_IP" true 2>/dev/null; do
+until $SSH_BASE_INSECURE nixtest@"$VM_IP" true 2>/dev/null; do
   if [[ "$(date +%s)" -ge "$DEADLINE" ]]; then
     echo
     echo "ERROR: Timed out waiting for SSH after Ubuntu autoinstall" >&2
@@ -197,6 +218,24 @@ until $SSH_BASE nixtest@"$VM_IP" true 2>/dev/null; do
   printf '.'; sleep 10
 done
 echo " ready"
+
+# ── Capture and pin the VM's host keys ─────────────────────────────────────
+# Once sshd is responding, capture all offered host keys with ssh-keyscan
+# and store them in a per-VM known_hosts file under .cache/ (gitignored).
+# Every subsequent SSH call uses StrictHostKeyChecking=yes against that
+# file, eliminating the MITM window on the security-sensitive
+# Nix-installer pipe below.  Residual risk: the keyscan itself is TOFU on a
+# local NAT'd Parallels network — adequate for dev use; for stronger
+# guarantees pre-seed host keys via cloud-init.
+echo "==> Capturing VM host keys → $KNOWN_HOSTS_FILE"
+rm -f "$KNOWN_HOSTS_FILE"
+ssh-keyscan -H -T 30 "$VM_IP" > "$KNOWN_HOSTS_FILE" 2>/dev/null
+if [[ ! -s "$KNOWN_HOSTS_FILE" ]]; then
+  echo "ERROR: ssh-keyscan returned no keys for $VM_IP" >&2
+  exit 1
+fi
+
+SSH_BASE="ssh -i $KEY_DIR/vm_key -o UserKnownHostsFile=$KNOWN_HOSTS_FILE -o StrictHostKeyChecking=yes -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── Install Nix (Determinate Systems) ─────────────────────────────────────
 echo "==> Installing Nix via Determinate Systems installer (~3 min)..."

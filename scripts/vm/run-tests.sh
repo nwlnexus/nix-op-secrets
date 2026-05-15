@@ -19,6 +19,7 @@ fi
 # to call at any point, even if the script exits before they are assigned.
 TEST_VM="" FIELD_ID="" SSH_ID="" DOC_ID=""
 VAULT="nix-op-secrets-test"
+KNOWN_HOSTS_FILE=""  # set once we know $TEST_VM's path; cleaned up on exit
 
 cleanup() {
   echo "==> Cleanup..."
@@ -27,6 +28,7 @@ cleanup() {
   for ID in ${FIELD_ID:-} ${SSH_ID:-} ${DOC_ID:-}; do
     [[ -n "$ID" ]] && op item delete "$ID" --vault "$VAULT" 2>/dev/null || true
   done
+  [[ -n "$KNOWN_HOSTS_FILE" && -f "$KNOWN_HOSTS_FILE" ]] && rm -f "$KNOWN_HOSTS_FILE"
   rmdir "$LOCK_DIR" 2>/dev/null || true
   echo "    Cleanup done"
 }
@@ -37,7 +39,15 @@ REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 KEY_DIR="$REPO_ROOT/tests/vm/keys"
 BASE_VM="nix-op-secrets-base"
 TEST_VM="nix-op-secrets-test-$(date +%s)"
-SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
+KNOWN_HOSTS_DIR="$REPO_ROOT/.cache/known_hosts"
+KNOWN_HOSTS_FILE="$KNOWN_HOSTS_DIR/$TEST_VM"
+mkdir -p "$KNOWN_HOSTS_DIR"
+
+# Two option sets — *_INSECURE only for the reachability poll (runs `true`,
+# no payload); everything that carries data uses $SSH_OPTS, which pins the
+# host keys captured below.  See setup-base.sh for the threat model.
+SSH_OPTS_INSECURE="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
+SSH_OPTS="-i $KEY_DIR/vm_key -o UserKnownHostsFile=$KNOWN_HOSTS_FILE -o StrictHostKeyChecking=yes -o BatchMode=yes -o PasswordAuthentication=no"
 
 # ── 1. Clone base VM ──────────────────────────────────────────────────────
 # Use a linked clone from the 'clean' snapshot — much faster than a deep copy.
@@ -67,10 +77,19 @@ done
 echo " $VM_IP"
 
 echo -n "==> Waiting for SSH..."
-until ssh $SSH_OPTS nixtest@"$VM_IP" true 2>/dev/null; do
+until ssh $SSH_OPTS_INSECURE nixtest@"$VM_IP" true 2>/dev/null; do
   printf '.'; sleep 3
 done
 echo " ready"
+
+# Capture and pin the clone's host keys. Linked-clone VMs inherit the base
+# VM's SSH host keys, but they get a fresh IP, so we re-keyscan per clone.
+echo "==> Capturing VM host keys → $KNOWN_HOSTS_FILE"
+ssh-keyscan -H -T 30 "$VM_IP" > "$KNOWN_HOSTS_FILE" 2>/dev/null
+if [[ ! -s "$KNOWN_HOSTS_FILE" ]]; then
+  echo "ERROR: ssh-keyscan returned no keys for $VM_IP" >&2
+  exit 1
+fi
 
 SSH="ssh $SSH_OPTS nixtest@$VM_IP"
 
