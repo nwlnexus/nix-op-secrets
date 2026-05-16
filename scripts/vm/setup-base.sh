@@ -14,10 +14,24 @@
 set -euo pipefail
 
 REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
-KEY_DIR="$REPO_ROOT/tests/vm/keys"
 CACHE_DIR="$REPO_ROOT/.cache"
 BASE_VM="nix-op-secrets-base"
 SNAP_NAME="clean"
+
+# ── Key location resolution ───────────────────────────────────────────────
+# The test VM's SSH keypair must persist across git worktrees — the Parallels
+# base VM's authorized_keys snapshot pins one specific public key, so wiping
+# the keypair (e.g. by `git worktree remove`) silently breaks every future
+# test until the base VM is rebuilt.  Default to an XDG cache path outside
+# any worktree.  Honour an existing repo-local `tests/vm/keys/` so already
+# set-up developers don't have to migrate manually.
+LEGACY_KEY_DIR="$REPO_ROOT/tests/vm/keys"
+DEFAULT_KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+if [[ -f "$LEGACY_KEY_DIR/vm_key" ]]; then
+  KEY_DIR="$LEGACY_KEY_DIR"
+else
+  KEY_DIR="$DEFAULT_KEY_DIR"
+fi
 
 UBUNTU_ISO_URL="https://releases.ubuntu.com/24.04.2/ubuntu-24.04.2-live-server-arm64.iso"
 UBUNTU_ISO_CACHE="$CACHE_DIR/ubuntu-24.04.2-server-arm64.iso"
@@ -27,11 +41,13 @@ UBUNTU_ISO_CACHE="$CACHE_DIR/ubuntu-24.04.2-server-arm64.iso"
 UBUNTU_ISO_PATCHED="$CACHE_DIR/ubuntu-24.04.2-server-arm64-autoinstall.iso"
 
 # ── SSH Key ────────────────────────────────────────────────────────────────
-echo "==> Checking SSH key..."
+echo "==> Checking SSH key at $KEY_DIR..."
 mkdir -p "$KEY_DIR"
+KEY_FRESHLY_GENERATED=0
 if [[ ! -f "$KEY_DIR/vm_key" ]]; then
   ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
   echo "    Generated SSH key at $KEY_DIR/vm_key"
+  KEY_FRESHLY_GENERATED=1
 else
   echo "    SSH key already exists — skipping"
 fi
@@ -39,9 +55,19 @@ PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
 
 # ── Skip if base VM already has a clean snapshot ───────────────────────────
 # `prlctl snapshot-list` only shows UUIDs by default; use JSON to read names.
+# Edge case: if we just generated a fresh key, the existing snapshot's
+# authorized_keys is for a different pubkey — silently skipping would leave
+# the user with a base VM nobody can SSH into.  Detect and rebuild.
 if prlctl snapshot-list "$BASE_VM" -j 2>/dev/null | grep -q "\"name\": \"$SNAP_NAME\""; then
-  echo "==> Base VM '$BASE_VM' already has snapshot '$SNAP_NAME' — nothing to do."
-  exit 0
+  if [[ "$KEY_FRESHLY_GENERATED" == "1" ]]; then
+    echo "==> Base VM snapshot exists but SSH key was just regenerated."
+    echo "    The snapshot's authorized_keys won't match — rebuilding base VM."
+    prlctl stop "$BASE_VM" --kill 2>/dev/null || true
+    prlctl delete "$BASE_VM" 2>/dev/null || true
+  else
+    echo "==> Base VM '$BASE_VM' already has snapshot '$SNAP_NAME' — nothing to do."
+    exit 0
+  fi
 fi
 
 # ── Download Ubuntu ISO ────────────────────────────────────────────────────
