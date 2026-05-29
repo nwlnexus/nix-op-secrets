@@ -22,6 +22,10 @@ let
       vaultArg    = if secret.vault    != null then secret.vault    else "";
       itemArg     = if secret.item     != null then secret.item     else "";
       templateArg = if secret.template != null then toString secret.template else "";
+      accountArg  = if secret.account  != null then secret.account  else "";
+      tokenCmdArg = if secret.serviceAccountTokenCommand != null
+                    then secret.serviceAccountTokenCommand
+                    else "";
     in ''
       fetch_secret \
         ${lib.escapeShellArg name} \
@@ -32,8 +36,18 @@ let
         ${lib.escapeShellArg templateArg} \
         ${lib.escapeShellArg secret.dest} \
         ${lib.escapeShellArg secret.mode} \
-        ${if secret.writePublicKey then "1" else "0"}
+        ${if secret.writePublicKey then "1" else "0"} \
+        ${lib.escapeShellArg accountArg} \
+        ${lib.escapeShellArg tokenCmdArg}
     '';
+
+  # True iff any declared secret carries its own account or token-command.
+  # When per-secret auth is in use, the module-level auth probe is downgraded
+  # to a soft check (so module-level account/token don't need to be set just
+  # to satisfy the probe).
+  anyPerSecretAuth = lib.any
+    (s: s.account != null || s.serviceAccountTokenCommand != null)
+    (lib.attrValues cfg.secrets);
 
   secretCommands = lib.concatStringsSep "\n" (
     lib.mapAttrsToList mkSecretCommand cfg.secrets
@@ -68,6 +82,7 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   SERVICE_ACCOUNT_TOKEN_FILE=${lib.escapeShellArg (
     if cfg.serviceAccountTokenFile != null then cfg.serviceAccountTokenFile else ""
   )}
+  ANY_PER_SECRET_AUTH=${if anyPerSecretAuth then "1" else "0"}
   IS_SYSTEM_ACTIVATION=${if isSystemActivation then "1" else "0"}
   ${lib.optionalString isSystemActivation ''
   ACTIVATION_USER=${lib.escapeShellArg cfg.user}
@@ -117,6 +132,9 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   }
 
   # ── Auth ─────────────────────────────────────────────────────────────────────
+  # When per-secret `account` or `serviceAccountTokenCommand` is in use,
+  # each secret authenticates itself; the module-level probe becomes
+  # advisory only.
   if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
     : # token in env — op picks it up natively
   elif [[ -n "$SERVICE_ACCOUNT_TOKEN_FILE" && -f "$SERVICE_ACCOUNT_TOKEN_FILE" ]]; then
@@ -124,6 +142,8 @@ in pkgs.writeShellScript "op-secrets-activate" ''
     export OP_SERVICE_ACCOUNT_TOKEN
   elif run_op whoami &>/dev/null; then
     : # already authenticated
+  elif [[ "$ANY_PER_SECRET_AUTH" == "1" ]]; then
+    : # per-secret auth will be applied by fetch_secret
   else
     if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
       echo "op-secrets: system activation requires a service account token — set OP_SERVICE_ACCOUNT_TOKEN or serviceAccountTokenFile" >&2
@@ -140,8 +160,34 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   # ── Secret handlers ──────────────────────────────────────────────────────────
   fetch_secret() {
     local name="$1" eff_type="$2" source="$3" vault="$4" item="$5" \
-          template="$6" dest="$7" mode="$8" write_pub="$9"
+          template="$6" dest="$7" mode="$8" write_pub="$9" \
+          sec_account="''${10:-}" sec_token_cmd="''${11:-}"
     local dest_tmp="''${dest}.tmp"
+
+    # Per-secret OP_ARGS / OP_SERVICE_ACCOUNT_TOKEN override.
+    # Save current state, apply secret-scoped overrides; we restore at the
+    # end of this function on success. On failure, set -e exits the script,
+    # so restoration is unnecessary.
+    local _saved_op_args=("''${OP_ARGS[@]}")
+    local _saved_token_was_set=0
+    local _saved_token=""
+    if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN+x}" ]]; then
+      _saved_token_was_set=1
+      _saved_token="$OP_SERVICE_ACCOUNT_TOKEN"
+    fi
+
+    if [[ -n "$sec_account" ]]; then
+      OP_ARGS=(--account "$sec_account")
+    fi
+    if [[ -n "$sec_token_cmd" ]]; then
+      local _tok
+      if ! _tok="$(bash -c "$sec_token_cmd")" || [[ -z "$_tok" ]]; then
+        echo "op-secrets: secret '$name': serviceAccountTokenCommand produced no token" >&2
+        exit 1
+      fi
+      OP_SERVICE_ACCOUNT_TOKEN="$_tok"
+      export OP_SERVICE_ACCOUNT_TOKEN
+    fi
 
     if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
       sudo -u "$ACTIVATION_USER" mkdir -p "$(dirname "$dest")"
@@ -197,6 +243,16 @@ in pkgs.writeShellScript "op-secrets-activate" ''
         exit 1
         ;;
     esac
+
+    # Restore module-level auth state (only reached on success — set -e
+    # exits the script on any failure above).
+    OP_ARGS=("''${_saved_op_args[@]}")
+    if [[ "$_saved_token_was_set" == "1" ]]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$_saved_token"
+      export OP_SERVICE_ACCOUNT_TOKEN
+    else
+      unset OP_SERVICE_ACCOUNT_TOKEN
+    fi
 
     echo "op-secrets: wrote $name → $dest"
   }

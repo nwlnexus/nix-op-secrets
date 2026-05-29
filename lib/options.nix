@@ -83,5 +83,32 @@ lib.types.submodule {
       '';
       example = true;
     };
+
+    account = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        Per-secret 1Password account override. When set, this account is used
+        instead of the module-level `op-secrets.account` for fetching this secret.
+        Lets a single `op-secrets` config pull secrets from multiple 1Password
+        accounts (e.g. a personal account and a work account).
+      '';
+      example = "my.1password.com";
+    };
+
+    serviceAccountTokenCommand = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        Per-secret service-account-token source. A shell command run at
+        activation time whose stdout is exported as `OP_SERVICE_ACCOUNT_TOKEN`
+        for this secret's fetch only. Useful when the token lives in a
+        `KEY=value` `.env` file or any non-raw format that
+        `serviceAccountTokenFile` (which expects a raw token file) can't
+        consume directly. Example to read from a `.env`:
+        `grep -E '^OP_SERVICE_ACCOUNT_TOKEN=' ~/projects/personal/.env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'"`
+      '';
+      example = "cat ~/.config/op/personal-token";
+    };
   };
 }

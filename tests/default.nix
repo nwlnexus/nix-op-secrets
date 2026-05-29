@@ -38,6 +38,8 @@ let
     writePublicKey = false;
     mode = "0600";
     source = null;
+    account = null;
+    serviceAccountTokenCommand = null;
   };
 
   mkSecret = attrs: baseSecret // attrs;
