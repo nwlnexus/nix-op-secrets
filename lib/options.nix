@@ -92,6 +92,15 @@ lib.types.submodule {
         instead of the module-level `op-secrets.account` for fetching this secret.
         Lets a single `op-secrets` config pull secrets from multiple 1Password
         accounts (e.g. a personal account and a work account).
+
+        Important: service-account tokens are account-scoped. When this option
+        is set without a matching `serviceAccountTokenCommand`, the module-level
+        token (from `OP_SERVICE_ACCOUNT_TOKEN` or `serviceAccountTokenFile`) is
+        explicitly *unset* for this secret's fetch, because it would be invalid
+        against a different account. The fetch will use whatever interactive
+        `op` session exists for the per-secret account. For fully autonomous
+        runs, supply a per-secret token via `serviceAccountTokenCommand` — or
+        keep every secret on the same account so the module-level token applies.
       '';
       example = "my.1password.com";
     };

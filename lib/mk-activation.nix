@@ -178,6 +178,12 @@ in pkgs.writeShellScript "op-secrets-activate" ''
 
     if [[ -n "$sec_account" ]]; then
       OP_ARGS=(--account "$sec_account")
+      # Service-account tokens are account-scoped, so the module-level
+      # token (issued for `op-secrets.account`) is invalid against a
+      # different per-secret account. Unset it; the fetch will fall back
+      # to whatever interactive op session exists for $sec_account
+      # unless a per-secret token-command supplies a matching token.
+      unset OP_SERVICE_ACCOUNT_TOKEN
     fi
     if [[ -n "$sec_token_cmd" ]]; then
       local _tok

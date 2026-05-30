@@ -28,7 +28,7 @@ imports = [ inputs.op-secrets.hmModules.default ];
 
 ## Auth
 
-Activation uses `op` CLI with this precedence:
+Activation uses `op` CLI with this precedence (module-level):
 
 1. `OP_SERVICE_ACCOUNT_TOKEN` in environment → used directly
 2. `serviceAccountTokenFile` option → token read from file
@@ -36,6 +36,23 @@ Activation uses `op` CLI with this precedence:
 4. Fallback → `op signin` interactively (requires a TTY; system activation exits immediately instead)
 
 For headless Linux hosts: set `OP_SERVICE_ACCOUNT_TOKEN` or `serviceAccountTokenFile`.
+
+### Multi-account configs
+
+Each secret may carry its own `account` and/or `serviceAccountTokenCommand`
+override (see [Usage](#usage) and the [options reference](#options-reference)),
+letting a single `op-secrets` block pull from more than one 1Password account.
+
+When a secret declares its own `account` *without* a matching
+`serviceAccountTokenCommand`, the module-level service-account token is
+explicitly dropped for that secret's fetch — tokens are account-scoped and the
+module token would be invalid against a different account. The fetch falls
+back to whatever interactive `op` session exists for the per-secret account
+(typically provided by the 1Password desktop app's CLI integration).
+
+For fully autonomous runs (no desktop session, no TTY), keep every secret on
+the module-level account so the module-level token applies to all of them, or
+supply a per-secret `serviceAccountTokenCommand` for each off-account secret.
 
 ## Usage
 
