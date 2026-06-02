@@ -24,8 +24,33 @@ in {
       description = ''
         Path to a file containing a 1Password service account token. For headless
         hosts without a desktop app. Overridden by `OP_SERVICE_ACCOUNT_TOKEN` env var.
+        Mutually exclusive with `connectHost` / `connectTokenFile`.
       '';
       example = "/run/secrets/op-token";
+    };
+
+    connectHost = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        URL of a 1Password Connect server (e.g. `https://connect.example.com:8080`).
+        Must be set together with `connectTokenFile`. Mutually exclusive with
+        `serviceAccountTokenFile`. Sets `OP_CONNECT_HOST` at activation time.
+        Overridden by the `OP_CONNECT_HOST` env var.
+      '';
+      example = "https://op-connect.internal:8080";
+    };
+
+    connectTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Path to a file containing the 1Password Connect API token. Must be set
+        together with `connectHost`. Mutually exclusive with `serviceAccountTokenFile`.
+        Sets `OP_CONNECT_TOKEN` at activation time. Overridden by `OP_CONNECT_TOKEN`
+        env var.
+      '';
+      example = "/run/secrets/op-connect-token";
     };
 
     secrets = lib.mkOption {
@@ -43,7 +68,16 @@ in {
       inherit lib;
       secrets    = cfg.secrets;
       moduleName = "op-secrets (hm)";
-    };
+    } ++ [
+      {
+        assertion = !(cfg.serviceAccountTokenFile != null && (cfg.connectHost != null || cfg.connectTokenFile != null));
+        message   = "op-secrets (hm): 'serviceAccountTokenFile' and connect options ('connectHost'/'connectTokenFile') are mutually exclusive";
+      }
+      {
+        assertion = (cfg.connectHost == null) == (cfg.connectTokenFile == null);
+        message   = "op-secrets (hm): 'connectHost' and 'connectTokenFile' must both be set or both be null";
+      }
+    ];
 
     home.activation.op-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
       # String-interpolating the derivation yields its executable store path

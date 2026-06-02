@@ -80,6 +80,8 @@ let
   mkCfg = secrets: {
     account = null;
     serviceAccountTokenFile = null;
+    connectHost = null;
+    connectTokenFile = null;
     inherit secrets;
   };
 

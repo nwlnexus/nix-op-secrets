@@ -82,6 +82,10 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   SERVICE_ACCOUNT_TOKEN_FILE=${lib.escapeShellArg (
     if cfg.serviceAccountTokenFile != null then cfg.serviceAccountTokenFile else ""
   )}
+  CONNECT_HOST=${lib.escapeShellArg (if cfg.connectHost != null then cfg.connectHost else "")}
+  CONNECT_TOKEN_FILE=${lib.escapeShellArg (
+    if cfg.connectTokenFile != null then cfg.connectTokenFile else ""
+  )}
   ANY_PER_SECRET_AUTH=${if anyPerSecretAuth then "1" else "0"}
   IS_SYSTEM_ACTIVATION=${if isSystemActivation then "1" else "0"}
   ${lib.optionalString isSystemActivation ''
@@ -132,25 +136,49 @@ in pkgs.writeShellScript "op-secrets-activate" ''
   }
 
   # ── Auth ─────────────────────────────────────────────────────────────────────
-  # When per-secret `account` or `serviceAccountTokenCommand` is in use,
-  # each secret authenticates itself; the module-level probe becomes
-  # advisory only.
+  # Priority order (first match wins):
+  #   1. OP_SERVICE_ACCOUNT_TOKEN already in env
+  #   2. serviceAccountTokenFile option → OP_SERVICE_ACCOUNT_TOKEN
+  #   3. Connect: effective host + token resolved independently
+  #              (each half: env takes priority over configured file/value)
+  #   4. Existing op session (whoami)
+  #   5. Per-secret auth (each secret handles itself)
+  #   6. Interactive op signin (requires TTY; fails in system activation)
+
+  # Resolve effective Connect credentials before the if/elif chain.
+  # Each half is resolved independently so mixed env+config combinations work.
+  _eff_connect_host="''${OP_CONNECT_HOST:-$CONNECT_HOST}"
+  _eff_connect_token=""
+  if [[ -n "''${OP_CONNECT_TOKEN:-}" ]]; then
+    _eff_connect_token="$OP_CONNECT_TOKEN"
+  elif [[ -n "$CONNECT_TOKEN_FILE" && -f "$CONNECT_TOKEN_FILE" ]]; then
+    _eff_connect_token="$(cat "$CONNECT_TOKEN_FILE")"
+  fi
+
   if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
-    : # token in env — op picks it up natively
+    : # service account token already in env — op picks it up natively
+    unset OP_CONNECT_HOST OP_CONNECT_TOKEN
   elif [[ -n "$SERVICE_ACCOUNT_TOKEN_FILE" && -f "$SERVICE_ACCOUNT_TOKEN_FILE" ]]; then
     OP_SERVICE_ACCOUNT_TOKEN="$(cat "$SERVICE_ACCOUNT_TOKEN_FILE")"
     export OP_SERVICE_ACCOUNT_TOKEN
+    unset OP_CONNECT_HOST OP_CONNECT_TOKEN
+  elif [[ -n "$_eff_connect_host" && -n "$_eff_connect_token" ]]; then
+    OP_CONNECT_HOST="$_eff_connect_host"
+    OP_CONNECT_TOKEN="$_eff_connect_token"
+    export OP_CONNECT_HOST OP_CONNECT_TOKEN
+    unset OP_SERVICE_ACCOUNT_TOKEN
   elif run_op whoami &>/dev/null; then
-    : # already authenticated
+    : # already authenticated via existing op session
   elif [[ "$ANY_PER_SECRET_AUTH" == "1" ]]; then
     : # per-secret auth will be applied by fetch_secret
   else
     if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
-      echo "op-secrets: system activation requires a service account token — set OP_SERVICE_ACCOUNT_TOKEN or serviceAccountTokenFile" >&2
+      echo "op-secrets: system activation requires a service account token or Connect credentials" >&2
+      echo "op-secrets: set OP_SERVICE_ACCOUNT_TOKEN / serviceAccountTokenFile, or OP_CONNECT_HOST+OP_CONNECT_TOKEN / connectHost+connectTokenFile" >&2
       exit 1
     fi
     echo "op-secrets: not authenticated — running op signin" >&2
-    echo "op-secrets: NOTE: interactive signin requires a TTY; use OP_SERVICE_ACCOUNT_TOKEN for non-interactive contexts" >&2
+    echo "op-secrets: NOTE: interactive signin requires a TTY; use a service account token or Connect for non-interactive contexts" >&2
     "$OP" signin "''${OP_ARGS[@]}" || {
       echo "op-secrets: authentication failed — aborting" >&2
       exit 1

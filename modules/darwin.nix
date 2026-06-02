@@ -20,7 +20,32 @@ in {
     serviceAccountTokenFile = lib.mkOption {
       type    = lib.types.nullOr lib.types.str;
       default = null;
-      description = lib.mdDoc "Path to a file containing a 1Password service account token.";
+      description = lib.mdDoc ''
+        Path to a file containing a 1Password service account token.
+        Mutually exclusive with `connectHost` / `connectTokenFile`.
+      '';
+    };
+
+    connectHost = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        URL of a 1Password Connect server (e.g. `https://connect.example.com:8080`).
+        Must be set together with `connectTokenFile`. Mutually exclusive with
+        `serviceAccountTokenFile`. Sets `OP_CONNECT_HOST` at activation time.
+      '';
+      example = "https://op-connect.internal:8080";
+    };
+
+    connectTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        Path to a file containing the 1Password Connect API token. Must be set
+        together with `connectHost`. Mutually exclusive with `serviceAccountTokenFile`.
+        Sets `OP_CONNECT_TOKEN` at activation time.
+      '';
+      example = "/run/secrets/op-connect-token";
     };
 
     user = lib.mkOption {
@@ -51,7 +76,16 @@ in {
       inherit lib;
       secrets    = cfg.secrets;
       moduleName = "op-secrets (darwin)";
-    };
+    } ++ [
+      {
+        assertion = !(cfg.serviceAccountTokenFile != null && (cfg.connectHost != null || cfg.connectTokenFile != null));
+        message   = "op-secrets (darwin): 'serviceAccountTokenFile' and connect options ('connectHost'/'connectTokenFile') are mutually exclusive";
+      }
+      {
+        assertion = (cfg.connectHost == null) == (cfg.connectTokenFile == null);
+        message   = "op-secrets (darwin): 'connectHost' and 'connectTokenFile' must both be set or both be null";
+      }
+    ];
 
     system.activationScripts.op-secrets.text = ''
       echo "op-secrets: fetching secrets for user ${cfg.user}"
