@@ -1,0 +1,4372 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: .llm/**
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.github/
+  workflows/
+    pack.yml
+docs/
+  superpowers/
+    plans/
+      2026-05-13-vm-testing.md
+    specs/
+      2026-05-13-vm-testing-design.md
+      nixos-test-design.md
+  vm-testing-macos.md
+lib/
+  mk-activation.nix
+  options.nix
+  validate.nix
+modules/
+  darwin.nix
+  hm.nix
+scripts/
+  vm/
+    run-tests.sh
+    setup-base.sh
+  test-vm.sh
+tests/
+  vm/
+    fixtures/
+      infra.env.tpl
+      test-doc.txt
+    configuration-macos.nix
+    flake.lock
+    flake.nix
+    home.nix
+  default.nix
+  infra.env.tpl
+  mock-op.sh
+.env.sample
+.envrc
+.gitignore
+flake.lock
+flake.nix
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".github/workflows/pack.yml">
+name: pack
+on:
+  push:
+    branches: [main]
+    paths-ignore: [".llm/**"]
+  workflow_dispatch:
+jobs:
+  pack:
+    uses: nwlnexus/nix-darwin-hm/.github/workflows/repomix-pack.yml@main
+    secrets: inherit
+</file>
+
+<file path="docs/superpowers/plans/2026-05-13-vm-testing.md">
+# VM-Based Integration Testing Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add automated VM-based integration tests to `nix-op-secrets` that exercise the full Home Manager activation path — real `op` CLI, real 1Password items, real file writes — inside an ephemeral Parallels NixOS VM, plus a committed manual guide for macOS VM testing.
+
+**Architecture:** Eight sequential tasks producing files in dependency order: environment → Nix configs → scripts → guide. No stored VM binaries — the base VM is reproducibly created by `setup-base.sh` from a custom NixOS installer ISO built on the host. Each test run clones the base VM from a snapshot, mounts the repo, runs `nixos-rebuild switch`, asserts file outputs, and tears down via a `trap cleanup EXIT` registered before any side effects.
+
+**Tech Stack:** Bash 5+ (with `set -euo pipefail`), Nix flakes, Parallels CLI (`prlctl` ≥26), 1Password CLI (`op`), NixOS 25.05, Home Manager 25.05, `jq`, `ssh`, `sed`
+
+---
+
+## File Map
+
+| Action | Path | Responsibility |
+|--------|------|----------------|
+| Modify | `.gitignore` | Add `.env`, `.cache/`, `tests/vm/keys/` |
+| Create | `.env.sample` | Developer setup instructions; committed template |
+| Create | `tests/vm/fixtures/test-doc.txt` | Fixture uploaded as 1Password Document item |
+| Create | `tests/vm/fixtures/infra.env.tpl` | `op inject` template referencing field secret |
+| Create | `tests/vm/nixos-base.nix` | NixOS config for base VM; `__VM_KEY_PUB__` placeholder |
+| Create | `tests/vm/configuration.nix` | HM config: all 4 secret types, fixed vault name |
+| Create | `tests/vm/configuration-macos.nix` | Placeholder for macOS manual guide |
+| Create | `tests/vm/flake.nix` | Stub flake: `nixosConfigurations.test-vm` + `darwinConfigurations.test-macos` |
+| Generate | `tests/vm/flake.lock` | Produced by `nix flake lock` in `tests/vm/` |
+| Create | `scripts/vm/setup-base.sh` | Idempotent base VM creation (SSH-driven install) |
+| Create | `scripts/vm/run-tests.sh` | Clone → mount → provision → assert → teardown |
+| Create | `scripts/test-vm.sh` | Entry point: prereq checks + calls subscripts |
+| Create | `docs/vm-testing-macos.md` | Full manual walkthrough for macOS VM testing |
+
+---
+
+### Task 1: Environment setup
+
+**Files:**
+- Modify: `.gitignore`
+- Create: `.env.sample`
+
+- [ ] **Step 1: Verify the current `.gitignore` content**
+
+  ```bash
+  cat /path/to/nix-op-secrets/.gitignore
+  ```
+  Expected output:
+  ```
+  result
+  result-*
+  .direnv/
+  ```
+
+- [ ] **Step 2: Add the three new gitignore entries**
+
+  Append to `.gitignore`:
+  ```
+  .env
+  .cache/
+  tests/vm/keys/
+  ```
+
+- [ ] **Step 3: Verify `.gitignore` now contains all required lines**
+
+  ```bash
+  grep -c "\.env\|\.cache/\|tests/vm/keys/" .gitignore
+  ```
+  Expected: `3`
+
+- [ ] **Step 4: Create `.env.sample`**
+
+  ```bash
+  # Copy this file to .env — NEVER commit .env
+  #
+  # 1. Generate a 1Password service account token:
+  #    https://developer.1password.com/docs/service-accounts/
+  #    The account needs read+write access to the test vault.
+  #
+  # 2. The test vault name is fixed at "nix-op-secrets-test".
+  #    Create it if it doesn't exist:
+  #      op vault create nix-op-secrets-test
+  #
+  # 3. Place this file at the repo root as .env before running:
+  #      ./scripts/test-vm.sh
+
+  OP_SERVICE_ACCOUNT_TOKEN=ops_your_token_here
+  ```
+
+- [ ] **Step 5: Verify `.env` would be gitignored**
+
+  ```bash
+  touch /tmp/test-env && cp /tmp/test-env .env
+  git check-ignore -v .env
+  ```
+  Expected: `.gitignore:4:.env	.env`
+  Clean up: `rm .env`
+
+- [ ] **Step 6: Commit**
+
+  ```bash
+  git add .gitignore .env.sample
+  git commit -m "chore: add gitignore entries and .env.sample for VM testing"
+  ```
+
+---
+
+### Task 2: Test fixtures
+
+**Files:**
+- Create: `tests/vm/fixtures/test-doc.txt`
+- Create: `tests/vm/fixtures/infra.env.tpl`
+
+These committed files are used during test runs: `test-doc.txt` is uploaded to 1Password as a Document item; `infra.env.tpl` is the `op inject` template referencing the field secret.
+
+- [ ] **Step 1: Create the fixtures directory**
+
+  ```bash
+  mkdir -p tests/vm/fixtures
+  ```
+
+- [ ] **Step 2: Create `tests/vm/fixtures/test-doc.txt`**
+
+  Content:
+  ```
+  nix-op-secrets test document fixture
+  This file is uploaded to 1Password as a Document item during VM integration tests.
+  ```
+
+- [ ] **Step 3: Create `tests/vm/fixtures/infra.env.tpl`**
+
+  Content:
+  ```
+  # op inject template — references the test field secret
+  FIELD_VAL={{ op://nix-op-secrets-test/nix-op-secrets-test-field/password }}
+  ```
+
+  > The vault name `nix-op-secrets-test` and item title `nix-op-secrets-test-field` are hardcoded and match what `run-tests.sh` creates in step 3.
+
+- [ ] **Step 4: Verify both files exist and have correct content**
+
+  ```bash
+  test -f tests/vm/fixtures/test-doc.txt && echo "test-doc.txt OK"
+  grep -q "op://nix-op-secrets-test/nix-op-secrets-test-field/password" \
+    tests/vm/fixtures/infra.env.tpl && echo "infra.env.tpl OK"
+  ```
+  Expected:
+  ```
+  test-doc.txt OK
+  infra.env.tpl OK
+  ```
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add tests/vm/fixtures/
+  git commit -m "test: add VM integration test fixtures"
+  ```
+
+---
+
+### Task 3: NixOS configs
+
+**Files:**
+- Create: `tests/vm/nixos-base.nix`
+- Create: `tests/vm/configuration.nix`
+- Create: `tests/vm/configuration-macos.nix`
+
+- [ ] **Step 1: Create `tests/vm/nixos-base.nix`**
+
+  This is the NixOS config template for the base VM. `setup-base.sh` substitutes the `__VM_KEY_PUB__` placeholder with the actual public key using `sed`.
+
+  ```nix
+  # tests/vm/nixos-base.nix
+  # Base NixOS configuration for the nix-op-secrets test VM.
+  # The __VM_KEY_PUB__ placeholder is substituted by setup-base.sh at install time.
+  { pkgs, lib, ... }:
+  {
+    # Boot
+    boot.loader.grub.enable  = true;
+    boot.loader.grub.device  = "/dev/sda";
+
+    # Networking
+    networking.useDHCP = true;
+
+    # SSH — key-only, no passwords
+    services.openssh.enable                            = true;
+    services.openssh.settings.PasswordAuthentication  = false;
+    services.openssh.settings.PermitRootLogin          = "no";
+
+    # Test user — isNormalUser required for SSH login as non-root
+    users.users.nixtest = {
+      isNormalUser = true;
+      home         = "/home/nixtest";
+      extraGroups  = [ "wheel" ];
+      openssh.authorizedKeys.keys = [ "__VM_KEY_PUB__" ];
+    };
+
+    # Allow wheel members to sudo without password (needed for nixos-rebuild)
+    security.sudo.wheelNeedsPassword = false;
+
+    # Nix flakes
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+    # Packages available in the base system
+    environment.systemPackages = [ pkgs.git pkgs.jq ];
+
+    # Parallels Tools — required for shared folders (repo mount) and guest agent
+    hardware.parallels.enable = true;
+    nixpkgs.config.allowUnfree = true;
+
+    system.stateVersion = "25.05";
+  }
+  ```
+
+- [ ] **Step 2: Verify `nixos-base.nix` contains the required fields**
+
+  ```bash
+  grep -c \
+    "isNormalUser\|home.*nixtest\|__VM_KEY_PUB__\|hardware\.parallels\|wheelNeedsPassword" \
+    tests/vm/nixos-base.nix
+  ```
+  Expected: `5`
+
+- [ ] **Step 3: Create `tests/vm/configuration.nix`**
+
+  This HM config is imported by the stub flake's `nixosConfigurations.test-vm`. All four secret types are declared; vault name is hardcoded to `nix-op-secrets-test`.
+
+  ```nix
+  # tests/vm/configuration.nix
+  # Home Manager configuration for VM integration tests.
+  # Declares all four op-secrets secret types against the fixed test vault.
+  { ... }:
+  {
+    # Home Manager config for nixtest user (wired via flake.nix)
+    home-manager.users.nixtest = {
+      op-secrets = {
+        enable  = true;
+        serviceAccountTokenFile = "/etc/op-secrets-test-token";
+
+        secrets = {
+          # 1. Field — plain op:// reference
+          test-field = {
+            type   = "field";
+            source = "op://nix-op-secrets-test/nix-op-secrets-test-field/password";
+            dest   = "/home/nixtest/.local/secrets/field.txt";
+          };
+
+          # 2. SSH key — writes private + public key pair
+          test-ssh = {
+            type           = "sshKey";
+            source         = "op://nix-op-secrets-test/nix-op-secrets-test-ssh";
+            dest           = "/home/nixtest/.ssh/test-vm-key";
+            writePublicKey = true;
+          };
+
+          # 3. Document — binary/text blob from 1Password
+          test-doc = {
+            type  = "document";
+            vault = "nix-op-secrets-test";
+            item  = "nix-op-secrets-test-doc";
+            dest  = "/home/nixtest/.local/secrets/doc.txt";
+          };
+
+          # 4. Template — op inject using committed fixture
+          test-template = {
+            type     = "template";
+            template = ./fixtures/infra.env.tpl;
+            dest     = "/home/nixtest/.local/secrets/infra.env";
+          };
+        };
+      };
+    };
+  }
+  ```
+
+- [ ] **Step 4: Create `tests/vm/configuration-macos.nix`**
+
+  Placeholder referenced by `darwinConfigurations.test-macos` in `flake.nix`. Required so the flake evaluates cleanly; actual macOS testing is manual (see `docs/vm-testing-macos.md`).
+
+  ```nix
+  # tests/vm/configuration-macos.nix
+  # Placeholder macOS configuration for the manual testing guide.
+  # See docs/vm-testing-macos.md for the full setup walkthrough.
+  { pkgs, ... }:
+  {
+    # Networking
+    networking.hostName = "nix-op-secrets-macos-test";
+
+    # Nix settings
+    nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+    # Packages
+    environment.systemPackages = [ pkgs.git pkgs.jq ];
+
+    system.stateVersion = 5;
+  }
+  ```
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add tests/vm/nixos-base.nix tests/vm/configuration.nix tests/vm/configuration-macos.nix
+  git commit -m "test: add NixOS base and HM test configurations for VM testing"
+  ```
+
+---
+
+### Task 4: Stub flake
+
+**Files:**
+- Create: `tests/vm/flake.nix`
+- Generate: `tests/vm/flake.lock`
+
+The stub flake is evaluated inside the VM during `nixos-rebuild switch`. `op-secrets` is pinned to GitHub but overridden at test time via `--override-input`.
+
+- [ ] **Step 1: Create `tests/vm/flake.nix`**
+
+  ```nix
+  {
+    description = "nix-op-secrets VM integration test flake";
+
+    inputs = {
+      nixpkgs.url    = "github:nixos/nixpkgs/nixos-25.05";
+      hm.url         = "github:nix-community/home-manager/release-25.05";
+      hm.inputs.nixpkgs.follows = "nixpkgs";
+      # op-secrets pinned to GitHub; overridden at test time with:
+      #   --override-input op-secrets path:/media/psf/nix-op-secrets
+      #   --no-write-lock-file
+      op-secrets.url = "github:nwlnexus/nix-op-secrets";
+      op-secrets.inputs.nixpkgs.follows = "nixpkgs";
+      darwin.url     = "github:nix-darwin/nix-darwin/nix-darwin-25.05";
+      darwin.inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    outputs = { self, nixpkgs, hm, op-secrets, darwin, ... }: {
+      # Linux automated test target
+      nixosConfigurations.test-vm = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [
+          ./nixos-base.nix
+          hm.nixosModules.home-manager
+          {
+            # HM NixOS integration options (NixOS-level, not HM-level)
+            home-manager.useGlobalPkgs   = true;
+            home-manager.useUserPackages = true;
+            # Wire op-secrets HM module and stateVersion into the nixtest user
+            home-manager.users.nixtest = {
+              imports = [ op-secrets.hmModules.default ];
+              home.stateVersion = "25.05";
+            };
+          }
+          ./configuration.nix
+        ];
+      };
+
+      # macOS manual test target — placeholder; see docs/vm-testing-macos.md
+      darwinConfigurations.test-macos = darwin.lib.darwinSystem {
+        system = "aarch64-darwin";
+        modules = [
+          hm.darwinModules.home-manager
+          op-secrets.darwinModules.default
+          ./configuration-macos.nix
+        ];
+      };
+    };
+  }
+  ```
+
+- [ ] **Step 2: Generate `tests/vm/flake.lock`**
+
+  Run from the `tests/vm/` directory. This requires network access. The lock file pins all GitHub inputs for reproducible builds.
+
+  ```bash
+  cd tests/vm && nix flake lock
+  ```
+
+  Expected: `tests/vm/flake.lock` is created with entries for `nixpkgs`, `hm`, `op-secrets`, and `darwin`.
+
+  Verify:
+  ```bash
+  nix flake metadata tests/vm 2>&1 | grep -E "nixpkgs|hm|op-secrets|darwin"
+  ```
+
+- [ ] **Step 3: Verify the flake evaluates**
+
+  ```bash
+  nix flake check tests/vm --no-build 2>&1 | tail -5
+  ```
+
+  Expected: exits 0 (or only warns about unfree packages which is fine since `nixpkgs.config.allowUnfree = true` is set in `nixos-base.nix` which is only evaluated for the NixOS system, not at the flake level).
+
+  > If the check fails with an unfree error, it is expected — `hardware.parallels.enable` requires unfree and is only enabled when the NixOS system is actually built. The flake structure itself is sound.
+
+- [ ] **Step 4: Commit**
+
+  ```bash
+  cd ../..  # return to repo root
+  git add tests/vm/flake.nix tests/vm/flake.lock
+  git commit -m "test: add stub flake for VM integration tests"
+  ```
+
+---
+
+### Task 5: Base VM setup script
+
+**Files:**
+- Create: `scripts/vm/setup-base.sh`
+
+`setup-base.sh` is idempotent — it skips each step if already done. On first run it: generates SSH keys, builds a custom NixOS installer ISO with the key baked in, creates a Parallels VM, boots the ISO, SSHes in as root to install NixOS, waits for the installed system to come up, and snapshots the clean state.
+
+- [ ] **Step 1: Create the scripts directory**
+
+  ```bash
+  mkdir -p scripts/vm
+  ```
+
+- [ ] **Step 2: Write `scripts/vm/setup-base.sh`**
+
+  ```bash
+  #!/usr/bin/env bash
+  # scripts/vm/setup-base.sh
+  # Idempotent: creates the nix-op-secrets-base Parallels VM and snapshots it.
+  # Safe to run multiple times — skips steps already completed.
+  set -euo pipefail
+
+  REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+  KEY_DIR="$REPO_ROOT/tests/vm/keys"
+  BASE_VM="nix-op-secrets-base"
+  SNAP_NAME="clean"
+
+  # ── SSH Key ────────────────────────────────────────────────────────────────
+  echo "==> Checking SSH key..."
+  mkdir -p "$KEY_DIR"
+  if [[ ! -f "$KEY_DIR/vm_key" ]]; then
+    ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
+    echo "    Generated SSH key at $KEY_DIR/vm_key"
+  else
+    echo "    SSH key already exists — skipping"
+  fi
+  PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
+
+  # ── Skip if base VM already has a clean snapshot ───────────────────────────
+  if prlctl snapshot-list "$BASE_VM" 2>/dev/null | grep -q "$SNAP_NAME"; then
+    echo "==> Base VM '$BASE_VM' already has snapshot '$SNAP_NAME' — nothing to do."
+    exit 0
+  fi
+
+  # ── Build custom installer ISO ─────────────────────────────────────────────
+  echo "==> Building custom NixOS installer ISO (this takes ~2 min on first run)..."
+  _ISO_DIR=$(nix build --no-link --print-out-paths \
+    --impure \
+    --expr "
+      let
+        pkgs = import <nixpkgs> {};
+      in (pkgs.nixos {
+        imports = [ \"\${<nixpkgs>}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix\" ];
+        services.openssh.enable = true;
+        services.openssh.settings.PermitRootLogin = \"yes\";
+        users.users.root.openssh.authorizedKeys.keys = [ \"$PUB_KEY\" ];
+      }).config.system.build.isoImage
+    " 2>/dev/null)
+  # Glob must expand on a separate line — not inside $()
+  INSTALLER_ISO=$(echo "$_ISO_DIR"/iso/*.iso)
+  echo "    ISO ready: $INSTALLER_ISO"
+
+  # ── Create VM (if it doesn't exist) ───────────────────────────────────────
+  echo "==> Checking if base VM exists..."
+  if ! prlctl list --all | grep -q "$BASE_VM"; then
+    echo "    Creating Parallels VM '$BASE_VM'..."
+    prlctl create "$BASE_VM" --ostype linux --distribution nixos --no-hdd
+    prlctl set "$BASE_VM" --cpus 2 --memsize 4096 --device-add hdd --size 20480
+    echo "    VM created"
+  else
+    echo "    VM already exists — skipping creation"
+  fi
+
+  # ── Boot from custom ISO ───────────────────────────────────────────────────
+  echo "==> Attaching installer ISO and starting VM..."
+  prlctl set "$BASE_VM" --device-set cdrom0 --image "$INSTALLER_ISO" --connect
+  prlctl start "$BASE_VM"
+
+  # ── Wait for DHCP IP ───────────────────────────────────────────────────────
+  echo "==> Waiting for VM to get a DHCP IP (up to 120s)..."
+  DEADLINE=$(( $(date +%s) + 120 ))
+  VM_IP=""
+  while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
+    if [[ "$(date +%s)" -ge "$DEADLINE" ]]; then
+      echo "ERROR: Timed out waiting for VM IP" >&2; exit 1
+    fi
+    sleep 3
+    VM_IP=$(prlctl list "$BASE_VM" -o ip --no-header | tr -d ' ')
+  done
+  echo "    VM IP: $VM_IP"
+
+  SSH_INSTALL="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$VM_IP"
+
+  # ── Wait for SSH on the live ISO ───────────────────────────────────────────
+  echo -n "==> Waiting for SSH on live ISO..."
+  DEADLINE=$(( $(date +%s) + 120 ))
+  until $SSH_INSTALL true 2>/dev/null; do
+    [[ "$(date +%s)" -ge "$DEADLINE" ]] && { echo; echo "ERROR: SSH timeout" >&2; exit 1; }
+    printf '.'; sleep 5
+  done
+  echo " ready"
+
+  # ── Partition and install NixOS ────────────────────────────────────────────
+  echo "==> Partitioning and installing NixOS..."
+  $SSH_INSTALL bash -s <<'INSTALL'
+  set -euo pipefail
+  parted /dev/sda -- mklabel gpt
+  parted /dev/sda -- mkpart primary 512MB 100%
+  parted /dev/sda -- mkpart ESP fat32 1MB 512MB
+  parted /dev/sda -- set 2 esp on
+  mkfs.ext4 -L nixos /dev/sda1
+  mkfs.fat -F 32 -n boot /dev/sda2
+  mount /dev/disk/by-label/nixos /mnt
+  mkdir -p /mnt/boot
+  mount -o umask=077 /dev/disk/by-label/boot /mnt/boot
+  nixos-generate-config --root /mnt
+  INSTALL
+
+  # ── Copy base config with key substituted ─────────────────────────────────
+  echo "==> Uploading base NixOS configuration..."
+  sed "s|__VM_KEY_PUB__|$PUB_KEY|g" "$REPO_ROOT/tests/vm/nixos-base.nix" \
+    | $SSH_INSTALL "cat > /mnt/etc/nixos/configuration.nix"
+
+  # ── Install and reboot ────────────────────────────────────────────────────
+  echo "==> Running nixos-install (this takes several minutes)..."
+  $SSH_INSTALL "nixos-install --no-root-passwd && reboot" || true
+
+  # ── Wait for installed system to come up ──────────────────────────────────
+  echo -n "==> Waiting for installed system SSH (nixtest user, up to 300s)..."
+  SSH_TEST="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nixtest@$VM_IP"
+  DEADLINE=$(( $(date +%s) + 300 ))
+  until $SSH_TEST true 2>/dev/null; do
+    [[ "$(date +%s)" -ge "$DEADLINE" ]] && { echo; echo "ERROR: SSH timeout after reboot" >&2; exit 1; }
+    printf '.'; sleep 5
+  done
+  echo " ready"
+
+  # ── Snapshot clean state ──────────────────────────────────────────────────
+  echo "==> Snapshotting clean state..."
+  prlctl stop "$BASE_VM"
+  prlctl snapshot create "$BASE_VM" --name "$SNAP_NAME"
+  echo "==> Base VM ready. Snapshot '$SNAP_NAME' created."
+  ```
+
+- [ ] **Step 3: Make the script executable**
+
+  ```bash
+  chmod +x scripts/vm/setup-base.sh
+  ```
+
+- [ ] **Step 4: Verify syntax**
+
+  ```bash
+  bash -n scripts/vm/setup-base.sh && echo "Syntax OK"
+  ```
+  Expected: `Syntax OK`
+
+- [ ] **Step 5: Verify safety properties**
+
+  ```bash
+  grep -c \
+    "set -euo pipefail\|DEADLINE.*date +%s\|prlctl snapshot-list.*clean\|sed.*__VM_KEY_PUB__" \
+    scripts/vm/setup-base.sh
+  ```
+  Expected: `4`
+
+- [ ] **Step 6: Commit**
+
+  ```bash
+  git add scripts/vm/setup-base.sh
+  git commit -m "feat: add idempotent base VM setup script"
+  ```
+
+---
+
+### Task 6: Test runner script
+
+**Files:**
+- Create: `scripts/vm/run-tests.sh`
+
+`run-tests.sh` clones the base VM, mounts the repo, creates 1Password test items, injects the service account token, runs `nixos-rebuild switch`, asserts all expected files exist with correct modes and content, and tears down. `trap cleanup EXIT` is registered as the very first statement.
+
+- [ ] **Step 1: Write `scripts/vm/run-tests.sh`**
+
+  ```bash
+  #!/usr/bin/env bash
+  # scripts/vm/run-tests.sh
+  # Runs one full test cycle: clone base VM → provision → assert → teardown.
+  # Called by scripts/test-vm.sh after prereq checks and OP_SERVICE_ACCOUNT_TOKEN is set.
+  set -euo pipefail
+
+  # ── Cleanup trap — registered FIRST, before any side effects ──────────────
+  # Variables used in cleanup are initialised empty here so cleanup() is safe
+  # to call at any point, even if the script exits before they are assigned.
+  TEST_VM="" FIELD_ID="" SSH_ID="" DOC_ID=""
+  VAULT="nix-op-secrets-test"
+
+  cleanup() {
+    echo "==> Cleanup..."
+    [[ -n "$TEST_VM"   ]] && prlctl stop   "$TEST_VM" --kill 2>/dev/null || true
+    [[ -n "$TEST_VM"   ]] && prlctl delete "$TEST_VM"        2>/dev/null || true
+    for ID in ${FIELD_ID:-} ${SSH_ID:-} ${DOC_ID:-}; do
+      [[ -n "$ID" ]] && op item delete "$ID" --vault "$VAULT" 2>/dev/null || true
+    done
+    echo "    Cleanup done"
+  }
+  trap cleanup EXIT
+
+  # ── Variables (after trap registration) ───────────────────────────────────
+  REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+  KEY_DIR="$REPO_ROOT/tests/vm/keys"
+  BASE_VM="nix-op-secrets-base"
+  TEST_VM="nix-op-secrets-test-$(date +%s)"
+  SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+
+  # ── 1. Clone base VM ──────────────────────────────────────────────────────
+  echo "==> Cloning '$BASE_VM' → '$TEST_VM'..."
+  prlctl clone "$BASE_VM" --name "$TEST_VM" --snapshot "clean"
+  prlctl start "$TEST_VM"
+
+  # ── 2. Mount repo + get IP ────────────────────────────────────────────────
+  echo "==> Mounting repo as shared folder..."
+  prlctl set "$TEST_VM" \
+    --shf-host-add nix-op-secrets \
+    --shf-host-path "$REPO_ROOT" \
+    --shf-host-ro off
+
+  echo -n "==> Waiting for VM IP (up to 60s)..."
+  DEADLINE=$(( $(date +%s) + 60 ))
+  VM_IP=""
+  while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
+    [[ "$(date +%s)" -ge "$DEADLINE" ]] && { echo; echo "ERROR: Timed out waiting for VM IP" >&2; exit 1; }
+    sleep 3
+    VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header | tr -d ' ')
+  done
+  echo " $VM_IP"
+
+  echo -n "==> Waiting for SSH..."
+  until ssh $SSH_OPTS nixtest@"$VM_IP" true 2>/dev/null; do
+    printf '.'; sleep 3
+  done
+  echo " ready"
+
+  SSH="ssh $SSH_OPTS nixtest@$VM_IP"
+
+  # ── 3. Create test 1Password items ────────────────────────────────────────
+  echo "==> Creating test 1Password items in vault '$VAULT'..."
+  FIELD_ID=$(op item create \
+    --vault "$VAULT" \
+    --category Login \
+    --title "nix-op-secrets-test-field" \
+    "password=test-field-value" \
+    --format json | jq -r '.id')
+  echo "    Field item: $FIELD_ID"
+
+  SSH_ID=$(op item create \
+    --vault "$VAULT" \
+    --category "SSH Key" \
+    --title "nix-op-secrets-test-ssh" \
+    --format json | jq -r '.id')
+  echo "    SSH Key item: $SSH_ID"
+
+  DOC_ID=$(op document create "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" \
+    --vault "$VAULT" \
+    --title "nix-op-secrets-test-doc" \
+    --format json | jq -r '.id')
+  echo "    Document item: $DOC_ID"
+  # Template uses fixtures/infra.env.tpl which references the field item — no extra item needed
+
+  # ── 4. Inject service account token into VM ───────────────────────────────
+  echo "==> Injecting service account token into VM..."
+  $SSH "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null"
+
+  # ── 5. Build and switch ───────────────────────────────────────────────────
+  echo "==> Running nixos-rebuild switch (this takes several minutes)..."
+  $SSH "sudo nixos-rebuild switch \
+    --flake /media/psf/nix-op-secrets/tests/vm#test-vm \
+    --override-input op-secrets path:/media/psf/nix-op-secrets \
+    --no-write-lock-file 2>&1"
+  echo "    Switch complete"
+
+  # ── 6. Assertions ─────────────────────────────────────────────────────────
+  echo "==> Running assertions..."
+
+  fail()          { echo "FAIL: $1" >&2; exit 1; }
+  check_file()    { $SSH "test -f '$1'" || fail "missing file: $1"; }
+  check_mode()    { MODE=$($SSH "stat -c '%a' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+  check_content() { $SSH "grep -qF '$2' '$1'" || fail "expected '$2' in $1"; }
+
+  # Field
+  check_file "/home/nixtest/.local/secrets/field.txt"
+  check_mode "/home/nixtest/.local/secrets/field.txt" "600"
+
+  # SSH key pair
+  check_file "/home/nixtest/.ssh/test-vm-key"
+  check_mode "/home/nixtest/.ssh/test-vm-key" "600"
+  check_file "/home/nixtest/.ssh/test-vm-key.pub"
+  check_mode "/home/nixtest/.ssh/test-vm-key.pub" "644"
+
+  # Document
+  check_file "/home/nixtest/.local/secrets/doc.txt"
+  check_mode "/home/nixtest/.local/secrets/doc.txt" "600"
+
+  # Template output — must contain the resolved field value
+  check_file    "/home/nixtest/.local/secrets/infra.env"
+  check_content "/home/nixtest/.local/secrets/infra.env" "test-field-value"
+
+  # Manifest — all five entries (including __pub synthetic key for sshKey)
+  for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
+    $SSH "jq -e '.\"$KEY\"' /home/nixtest/.local/state/op-secrets/manifest.json" > /dev/null \
+      || fail "manifest missing key: $KEY"
+  done
+
+  echo ""
+  echo "✓ All VM integration tests passed"
+  ```
+
+- [ ] **Step 2: Make executable**
+
+  ```bash
+  chmod +x scripts/vm/run-tests.sh
+  ```
+
+- [ ] **Step 3: Verify syntax**
+
+  ```bash
+  bash -n scripts/vm/run-tests.sh && echo "Syntax OK"
+  ```
+  Expected: `Syntax OK`
+
+- [ ] **Step 4: Verify trap is registered before any `op item create`**
+
+  ```bash
+  # trap cleanup EXIT must appear before any "op item create" line
+  TRAP_LINE=$(grep -n "trap cleanup EXIT" scripts/vm/run-tests.sh | head -1 | cut -d: -f1)
+  FIRST_OP_LINE=$(grep -n "op item create" scripts/vm/run-tests.sh | head -1 | cut -d: -f1)
+  [[ "$TRAP_LINE" -lt "$FIRST_OP_LINE" ]] && echo "Trap order OK" || echo "FAIL: trap after op item create"
+  ```
+  Expected: `Trap order OK`
+
+- [ ] **Step 5: Commit**
+
+  ```bash
+  git add scripts/vm/run-tests.sh
+  git commit -m "feat: add VM test runner with cleanup trap and assertions"
+  ```
+
+---
+
+### Task 7: Entry point script
+
+**Files:**
+- Create: `scripts/test-vm.sh`
+
+`test-vm.sh` is the single command a developer runs. It sources `.env`, checks all prerequisites with actionable error messages, and then calls `setup-base.sh` and `run-tests.sh`.
+
+- [ ] **Step 1: Write `scripts/test-vm.sh`**
+
+  ```bash
+  #!/usr/bin/env bash
+  # scripts/test-vm.sh
+  # Entry point for VM-based integration tests.
+  # Usage: ./scripts/test-vm.sh
+  #
+  # Prerequisites:
+  #   - Parallels Desktop ≥26 with prlctl on PATH
+  #   - 1Password CLI (op) on PATH
+  #   - .env at repo root containing OP_SERVICE_ACCOUNT_TOKEN
+  #   - The "nix-op-secrets-test" vault must exist in your 1Password account
+  set -euo pipefail
+
+  REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+  ENV_FILE="$REPO_ROOT/.env"
+
+  # ── Prereq: prlctl ────────────────────────────────────────────────────────
+  if ! command -v prlctl &>/dev/null; then
+    echo "ERROR: prlctl not found." >&2
+    echo "  Install Parallels Desktop ≥26 and ensure prlctl is on your PATH." >&2
+    echo "  Typically: /usr/local/bin/prlctl" >&2
+    exit 1
+  fi
+  if ! prlctl list &>/dev/null; then
+    echo "ERROR: prlctl is available but 'prlctl list' failed." >&2
+    echo "  This usually means Parallels Desktop is not licensed or not running." >&2
+    exit 1
+  fi
+
+  # ── Prereq: op CLI ────────────────────────────────────────────────────────
+  if ! command -v op &>/dev/null; then
+    echo "ERROR: 1Password CLI (op) not found." >&2
+    echo "  Install it: brew install 1password-cli" >&2
+    echo "  Or: https://developer.1password.com/docs/cli/get-started/" >&2
+    exit 1
+  fi
+
+  # ── Prereq: .env ──────────────────────────────────────────────────────────
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "ERROR: .env not found at $ENV_FILE" >&2
+    echo "  Copy .env.sample to .env and fill in your service account token:" >&2
+    echo "    cp .env.sample .env && \$EDITOR .env" >&2
+    exit 1
+  fi
+  # shellcheck source=/dev/null
+  source "$ENV_FILE"
+
+  # ── Prereq: OP_SERVICE_ACCOUNT_TOKEN ─────────────────────────────────────
+  if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+    echo "ERROR: OP_SERVICE_ACCOUNT_TOKEN is not set in .env" >&2
+    echo "  Generate a service account token at:" >&2
+    echo "    https://developer.1password.com/docs/service-accounts/" >&2
+    exit 1
+  fi
+  export OP_SERVICE_ACCOUNT_TOKEN
+
+  # ── Prereq: op auth ───────────────────────────────────────────────────────
+  if ! op vault list &>/dev/null; then
+    echo "ERROR: 'op vault list' failed — service account token may be invalid or expired." >&2
+    echo "  Check your token at: https://1password.com/sign-in" >&2
+    exit 1
+  fi
+
+  # ── Prereq: test vault ────────────────────────────────────────────────────
+  if ! op vault get nix-op-secrets-test &>/dev/null; then
+    echo "The vault 'nix-op-secrets-test' does not exist in your 1Password account."
+    printf "Create it now? [y/N] "
+    read -r REPLY
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+      op vault create nix-op-secrets-test
+      echo "Vault created."
+    else
+      echo "ERROR: Please create the vault manually: op vault create nix-op-secrets-test" >&2
+      exit 1
+    fi
+  fi
+
+  # ── Run ───────────────────────────────────────────────────────────────────
+  echo "==> All prerequisites satisfied"
+  echo ""
+  echo "==> Step 1: Ensure base VM exists (idempotent)"
+  bash "$REPO_ROOT/scripts/vm/setup-base.sh"
+
+  echo ""
+  echo "==> Step 2: Run integration tests"
+  bash "$REPO_ROOT/scripts/vm/run-tests.sh"
+  ```
+
+- [ ] **Step 2: Make executable**
+
+  ```bash
+  chmod +x scripts/test-vm.sh
+  ```
+
+- [ ] **Step 3: Verify syntax**
+
+  ```bash
+  bash -n scripts/test-vm.sh && echo "Syntax OK"
+  ```
+  Expected: `Syntax OK`
+
+- [ ] **Step 4: Verify all six prereq checks are present**
+
+  ```bash
+  grep -c "ERROR:" scripts/test-vm.sh
+  ```
+  Expected: `7` (prlctl missing, prlctl license, op missing, .env missing, token missing, auth fail, and the else-branch vault message)
+
+- [ ] **Step 5: Verify `.env` is sourced before token check**
+
+  ```bash
+  SRC_LINE=$(grep -n 'source.*ENV_FILE' scripts/test-vm.sh | head -1 | cut -d: -f1)
+  TOK_LINE=$(grep -n 'OP_SERVICE_ACCOUNT_TOKEN.*:-' scripts/test-vm.sh | head -1 | cut -d: -f1)
+  [[ "$SRC_LINE" -lt "$TOK_LINE" ]] && echo "Source order OK" || echo "FAIL"
+  ```
+  Expected: `Source order OK`
+
+- [ ] **Step 6: Commit**
+
+  ```bash
+  git add scripts/test-vm.sh
+  git commit -m "feat: add test-vm.sh entry point with prereq checks"
+  ```
+
+---
+
+### Task 8: macOS VM guide
+
+**Files:**
+- Create: `docs/vm-testing-macos.md`
+
+This is a committed markdown guide covering the full manual macOS VM testing workflow. It cannot be automated (macOS VMs in Parallels require manual setup assistant interaction).
+
+- [ ] **Step 1: Create `docs/vm-testing-macos.md`**
+
+  ```markdown
+  # macOS VM Testing Guide
+
+  This guide covers the manual steps for testing the `nix-op-secrets` nix-darwin module
+  inside a Parallels macOS VM. The Linux (NixOS) path is fully automated via
+  `./scripts/test-vm.sh`; macOS requires manual VM setup due to Apple's setup assistant.
+
+  ## Prerequisites
+
+  | Requirement | Notes |
+  |-------------|-------|
+  | Parallels Desktop ≥26 | With `prlctl` on PATH |
+  | macOS IPSW | Download via `softwareupdate --fetch-full-installer --full-installer-version <ver>` |
+  | `op` CLI | `brew install 1password-cli` |
+  | `.env` at repo root | See `.env.sample` — token must have access to `nix-op-secrets-test` vault |
+  | `tests/vm/keys/` | Generated by `setup-base.sh` on the Linux path, or by running the keygen block below |
+
+  ### Generate SSH keys (if not already present)
+
+  If you haven't run the Linux test path first, generate keys manually:
+
+  ```bash
+  KEY_DIR="$(git rev-parse --show-toplevel)/tests/vm/keys"
+  mkdir -p "$KEY_DIR"
+  ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
+  ```
+
+  ## Steps
+
+  ### 1. Download macOS IPSW
+
+  ```bash
+  softwareupdate --fetch-full-installer --full-installer-version 15.0
+  # IPSW saved to ~/Library/Application Support/com.apple.SFSymbols/ or similar
+  # Locate it: find ~/Library -name "*.ipsw" 2>/dev/null
+  ```
+
+  ### 2. Create the VM in Parallels
+
+  Open Parallels Desktop → **File → New** → **Install macOS from IPSW** → select the IPSW.
+
+  Settings:
+  - Name: `nix-op-secrets-macos-base`
+  - CPUs: 4
+  - Memory: 8 GB
+  - Disk: 60 GB
+
+  ### 3. Complete setup assistant
+
+  Boot the VM, complete the macOS setup assistant, create user **`nixtest`** with admin privileges.
+
+  Enable Remote Login (required for SSH):
+
+  ```bash
+  # In the VM's Terminal:
+  sudo systemsetup -setremotelogin on
+  ```
+
+  ### 4. Install tooling in the VM
+
+  ```bash
+  # In the VM's Terminal:
+
+  # Nix (Determinate Systems installer — sets up flakes by default)
+  curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+    | sh -s -- install
+
+  # nix-darwin
+  nix run nix-darwin -- switch --flake ~/.config/darwin
+
+  # 1Password CLI
+  brew install 1password-cli
+  ```
+
+  ### 5. Authorise SSH from host
+
+  From the **host machine** (after SSH keys have been generated):
+
+  ```bash
+  SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  VM_IP=<check Parallels UI or prlctl list -o ip>
+
+  ssh-copy-id -i tests/vm/keys/vm_key.pub nixtest@"$VM_IP"
+  # Alternatively, append tests/vm/keys/vm_key.pub to ~/.ssh/authorized_keys in the VM
+  ```
+
+  Test connectivity:
+
+  ```bash
+  ssh -i tests/vm/keys/vm_key $SSH_OPTS nixtest@"$VM_IP" echo "SSH OK"
+  ```
+
+  ### 6. Snapshot the base state
+
+  ```bash
+  prlctl snapshot create nix-op-secrets-macos-base --name "clean"
+  ```
+
+  ### 7. Create test 1Password items
+
+  From the **host machine** (with `.env` sourced):
+
+  ```bash
+  source .env
+
+  VAULT="nix-op-secrets-test"
+
+  FIELD_ID=$(op item create \
+    --vault "$VAULT" --category Login \
+    --title "nix-op-secrets-test-field" \
+    "password=test-field-value" \
+    --format json | jq -r '.id')
+
+  SSH_ID=$(op item create \
+    --vault "$VAULT" --category "SSH Key" \
+    --title "nix-op-secrets-test-ssh" \
+    --format json | jq -r '.id')
+
+  DOC_ID=$(op document create tests/vm/fixtures/test-doc.txt \
+    --vault "$VAULT" \
+    --title "nix-op-secrets-test-doc" \
+    --format json | jq -r '.id')
+
+  echo "FIELD_ID=$FIELD_ID  SSH_ID=$SSH_ID  DOC_ID=$DOC_ID"
+  # Save these — needed for cleanup in step 11
+  ```
+
+  ### 8. Inject service account token into VM
+
+  ```bash
+  SSH_OPTS="-i tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  source .env
+
+  ssh $SSH_OPTS nixtest@"$VM_IP" \
+    "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null"
+  ```
+
+  ### 9. Mount repo and run darwin-rebuild
+
+  ```bash
+  # Mount the repo as a Parallels shared folder
+  prlctl set nix-op-secrets-macos-base \
+    --shf-host-add nix-op-secrets \
+    --shf-host-path "$(pwd)"
+  # The repo is now available at /Volumes/nix-op-secrets inside the VM
+
+  # Run darwin-rebuild switch from the host over SSH
+  # --override-input redirects op-secrets to the mounted checkout
+  # --no-write-lock-file prevents modifying the committed flake.lock
+  ssh $SSH_OPTS nixtest@"$VM_IP" \
+    "sudo darwin-rebuild switch \
+      --flake /Volumes/nix-op-secrets/tests/vm#test-macos \
+      --override-input op-secrets path:/Volumes/nix-op-secrets \
+      --no-write-lock-file"
+  ```
+
+  ### 10. Run assertions
+
+  Same checks as the Linux automated path, executed over SSH:
+
+  ```bash
+  SSH="ssh $SSH_OPTS nixtest@$VM_IP"
+  fail()          { echo "FAIL: $1" >&2; exit 1; }
+  check_file()    { $SSH "test -f '$1'" || fail "missing: $1"; }
+  check_mode()    { MODE=$($SSH "stat -f '%OLp' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+  check_content() { $SSH "grep -qF '$2' '$1'" || fail "expected '$2' in $1"; }
+
+  check_file    "/Users/nixtest/.local/secrets/field.txt"
+  check_mode    "/Users/nixtest/.local/secrets/field.txt" "600"
+  check_file    "/Users/nixtest/.ssh/test-vm-key"
+  check_mode    "/Users/nixtest/.ssh/test-vm-key" "600"
+  check_file    "/Users/nixtest/.ssh/test-vm-key.pub"
+  check_mode    "/Users/nixtest/.ssh/test-vm-key.pub" "644"
+  check_file    "/Users/nixtest/.local/secrets/doc.txt"
+  check_mode    "/Users/nixtest/.local/secrets/doc.txt" "600"
+  check_file    "/Users/nixtest/.local/secrets/infra.env"
+  check_content "/Users/nixtest/.local/secrets/infra.env" "test-field-value"
+
+  for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
+    $SSH "jq -e '.\"$KEY\"' /Users/nixtest/.local/state/op-secrets/manifest.json" > /dev/null \
+      || fail "manifest missing: $KEY"
+  done
+
+  echo "All macOS VM integration tests passed"
+  ```
+
+  > **Note:** macOS uses `stat -f '%OLp'` (BSD stat) rather than `stat -c '%a'` (GNU stat used in the Linux scripts).
+
+  ### 11. Cleanup
+
+  ```bash
+  # Revert VM to clean snapshot (ready for next test run)
+  prlctl snapshot revert nix-op-secrets-macos-base "clean"
+
+  # Delete test 1Password items
+  source .env
+  op item delete "$FIELD_ID" --vault nix-op-secrets-test
+  op item delete "$SSH_ID"   --vault nix-op-secrets-test
+  op item delete "$DOC_ID"   --vault nix-op-secrets-test
+  ```
+  ```
+
+- [ ] **Step 2: Verify the guide exists and has all 11 sections**
+
+  ```bash
+  grep -cE "^### [0-9]+\." docs/vm-testing-macos.md
+  ```
+  Expected: `11`
+
+- [ ] **Step 3: Commit**
+
+  ```bash
+  git add docs/vm-testing-macos.md
+  git commit -m "docs: add macOS VM testing manual guide"
+  ```
+
+---
+
+## Final verification
+
+After all 8 tasks are complete:
+
+- [ ] **Verify all expected files are in place**
+
+  ```bash
+  for F in \
+    .env.sample \
+    scripts/test-vm.sh \
+    scripts/vm/setup-base.sh \
+    scripts/vm/run-tests.sh \
+    tests/vm/flake.nix \
+    tests/vm/flake.lock \
+    tests/vm/nixos-base.nix \
+    tests/vm/configuration.nix \
+    tests/vm/configuration-macos.nix \
+    tests/vm/fixtures/test-doc.txt \
+    tests/vm/fixtures/infra.env.tpl \
+    docs/vm-testing-macos.md
+  do
+    test -f "$F" && echo "✓ $F" || echo "✗ MISSING: $F"
+  done
+  ```
+  Expected: all lines show `✓`.
+
+- [ ] **Verify scripts are all executable**
+
+  ```bash
+  for S in scripts/test-vm.sh scripts/vm/setup-base.sh scripts/vm/run-tests.sh; do
+    test -x "$S" && echo "✓ $S" || echo "✗ NOT EXECUTABLE: $S"
+  done
+  ```
+
+- [ ] **Verify gitignore covers all sensitive paths**
+
+  ```bash
+  for P in .env .cache/ tests/vm/keys/; do
+    git check-ignore -q "$P" && echo "✓ $P is gitignored" || echo "✗ NOT IGNORED: $P"
+  done
+  ```
+
+- [ ] **Syntax check all scripts**
+
+  ```bash
+  for S in scripts/test-vm.sh scripts/vm/setup-base.sh scripts/vm/run-tests.sh; do
+    bash -n "$S" && echo "✓ $S syntax OK"
+  done
+  ```
+</file>
+
+<file path="docs/superpowers/specs/2026-05-13-vm-testing-design.md">
+# VM-Based Integration Testing Design
+
+## Goal
+
+Add automated VM-based integration tests to `nix-op-secrets` that exercise the full activation path — real `op` CLI, real 1Password items, real file writes — inside an ephemeral Parallels Linux (NixOS) VM. Supplement with a documented manual guide for macOS VM testing (nix-darwin module path).
+
+## Architecture
+
+Two test paths:
+
+| Path | Automation | Module tested |
+|------|-----------|---------------|
+| Linux (NixOS) | Fully automated script | `hmModules.default` via HM NixOS module |
+| macOS | Manual guide + snapshot workflow | `darwinModules.default` via nix-darwin |
+
+The Linux path creates a reproducible base VM from a NixOS ISO (no stored binary), clones it per test run, mounts the repo as a Parallels shared folder, runs `nixos-rebuild switch` with a stub flake, asserts file output, and tears down. All state is local to the repo directory (gitignored).
+
+## File Structure
+
+```
+nix-op-secrets/
+├── .env                          # gitignored — developer places token here
+├── .env.sample                   # committed — template showing required vars
+├── .cache/                       # gitignored — ISO download cache
+├── scripts/
+│   ├── test-vm.sh                # top-level entry point
+│   └── vm/
+│       ├── setup-base.sh         # idempotent: creates NixOS base VM if missing
+│       └── run-tests.sh          # clone → mount → provision → test → teardown
+├── tests/
+│   ├── vm/
+│   │   ├── flake.nix             # NixOS flake: nixosConfigurations.test-vm + darwinConfigurations.test-macos (stub)
+│   │   ├── configuration.nix     # NixOS + HM config with all four secret type declarations
+│   │   ├── flake.lock            # pinned — reproducible builds
+│   │   ├── fixtures/
+│   │   │   ├── test-doc.txt      # fixture file uploaded as 1Password Document item
+│   │   │   └── infra.env.tpl     # op inject template: FIELD_VAL={{ op://nix-op-secrets-test/nix-op-secrets-test-field/password }}
+│   │   ├── keys/                 # gitignored — generated by setup-base.sh
+│   │   │   ├── vm_key            # SSH private key
+│   │   │   └── vm_key.pub        # SSH public key
+│   │   └── nixos-base.nix        # NixOS config for the base VM install
+│   ├── default.nix               # existing Nix unit tests (mock op)
+│   └── mock-op.sh                # existing mock
+└── docs/
+    └── vm-testing-macos.md       # manual guide for macOS VM testing
+```
+
+## Environment Setup
+
+### `.env.sample`
+
+```bash
+# Copy this file to .env — NEVER commit .env
+#
+# 1. Generate a 1Password service account token:
+#    https://developer.1password.com/docs/service-accounts/
+#    The account needs read+write access to the test vault.
+#
+# 2. The test vault name is fixed at "nix-op-secrets-test".
+#    Create it if it doesn't exist: op vault create nix-op-secrets-test
+#
+# 3. Place this file at the repo root as .env before running ./scripts/test-vm.sh
+
+OP_SERVICE_ACCOUNT_TOKEN=ops_your_token_here
+```
+
+**Note:** The 1Password vault name is fixed at `nix-op-secrets-test` and is not configurable via `.env`. The `op://` URIs in `tests/vm/configuration.nix` and `tests/vm/fixtures/infra.env.tpl` hardcode this vault name. This keeps the stub flake reproducible without runtime templating.
+
+### `.gitignore` additions
+
+```
+.env
+.cache/
+tests/vm/keys/
+```
+
+## Prerequisites
+
+Checked at the top of `test-vm.sh` with clear error messages:
+
+| Prereq | Check |
+|--------|-------|
+| `prlctl` | `command -v prlctl` + `prlctl list` succeeds (confirms license) |
+| `op` CLI | `command -v op` |
+| `.env` | File exists at repo root |
+| `OP_SERVICE_ACCOUNT_TOKEN` | Set and non-empty after sourcing `.env` |
+| `op` auth | `op vault list` succeeds with the token (confirms connectivity) |
+| `nix-op-secrets-test` vault exists | `op vault get nix-op-secrets-test` succeeds, or offer to create it |
+
+## Base VM Setup (`scripts/vm/setup-base.sh`)
+
+Idempotent — safe to run multiple times. Skips steps already completed. Checks `prlctl list` for `nix-op-secrets-base` before doing any work.
+
+### SSH Key Generation
+
+Generated before any VM work. Keys live in the repo (gitignored).
+
+```bash
+KEY_DIR="$(git rev-parse --show-toplevel)/tests/vm/keys"
+mkdir -p "$KEY_DIR"
+if [[ ! -f "$KEY_DIR/vm_key" ]]; then
+  ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
+fi
+PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
+```
+
+### NixOS Base VM Creation
+
+1. **Download NixOS ISO** — NixOS 25.05 minimal, aarch64-linux, to `.cache/nixos.iso` (gitignored). Verified with SHA256 from the official NixOS release.
+
+2. **Create VM**
+   ```bash
+   prlctl create "nix-op-secrets-base" \
+     --ostype linux \
+     --distribution nixos \
+     --no-hdd
+   prlctl set "nix-op-secrets-base" \
+     --cpus 2 --memsize 4096 --device-add hdd --size 20480
+   prlctl set "nix-op-secrets-base" \
+     --device-set cdrom0 --image "$ISO_PATH" --connect
+   prlctl start "nix-op-secrets-base"
+   ```
+
+3. **Build a custom installer ISO with the SSH key baked in** — The stock NixOS live ISO does not include the Parallels Tools guest agent (that is only installed by `hardware.parallels.enable` on the final system), so `prlctl exec` is not available during the install. Instead, `setup-base.sh` uses `nix build` on the host to produce a custom NixOS installer ISO that has SSH enabled and the generated public key pre-authorised for root login:
+
+   ```bash
+   # Build the custom installer ISO on the host
+   # nixos-generators is available in nixpkgs
+   _ISO_DIR=$(nix build --no-link --print-out-paths \
+     --impure \
+     --expr "
+       let
+         pkgs = import <nixpkgs> {};
+         lib  = pkgs.lib;
+       in (pkgs.nixos {
+         imports = [ \"\${<nixpkgs>}/nixos/modules/installer/cd-dvd/installation-cd-minimal.nix\" ];
+         services.openssh.enable = true;
+         services.openssh.settings.PermitRootLogin = \"yes\";
+         users.users.root.openssh.authorizedKeys.keys = [ \"$PUB_KEY\" ];
+       }).config.system.build.isoImage
+     " 2>/dev/null)
+   # Glob must expand on a separate line — not inside $()
+   INSTALLER_ISO=$(echo "$_ISO_DIR"/iso/*.iso)
+   ```
+
+   This produces an ISO (~800MB) that is identical to the upstream minimal ISO except for the authorised SSH key. Building it takes ~2 minutes on first run; subsequent runs are instant because the Nix store caches the derivation (only the key changes between setups, so the derivation is keyed by `$PUB_KEY`).
+
+4. **Boot custom ISO and install via SSH**
+
+   ```bash
+   prlctl set "nix-op-secrets-base" \
+     --device-set cdrom0 --image "$INSTALLER_ISO" --connect
+   prlctl start "nix-op-secrets-base"
+
+   # Get VM IP — poll prlctl until it returns a real address (not "-" or blank),
+   # with a 120 s timeout. Parallels reports DHCP-assigned IPs via its NAT/host-only
+   # network without requiring guest agent; the live ISO just needs a few seconds
+   # before DHCP settles.
+   DEADLINE=$(( $(date +%s) + 120 ))
+   VM_IP=""
+   while [ -z "$VM_IP" ] || [ "$VM_IP" = "-" ]; do
+     [ "$(date +%s)" -ge "$DEADLINE" ] && { echo "Timed out waiting for VM IP"; exit 1; }
+     sleep 3
+     VM_IP=$(prlctl list "nix-op-secrets-base" -o ip --no-header | tr -d ' ')
+   done
+   SSH_INSTALL="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@$VM_IP"
+
+   until $SSH_INSTALL true 2>/dev/null; do printf '.'; sleep 5; done
+
+   # Partition, install, reboot
+   $SSH_INSTALL bash -s <<'INSTALL'
+     set -euo pipefail
+     parted /dev/sda -- mklabel gpt
+     parted /dev/sda -- mkpart primary 512MB 100%
+     parted /dev/sda -- mkpart ESP fat32 1MB 512MB
+     parted /dev/sda -- set 2 esp on
+     mkfs.ext4 -L nixos /dev/sda1
+     mkfs.fat -F 32 -n boot /dev/sda2
+     mount /dev/disk/by-label/nixos /mnt
+     mkdir -p /mnt/boot
+     mount -o umask=077 /dev/disk/by-label/boot /mnt/boot
+     nixos-generate-config --root /mnt
+   INSTALL
+
+   # Copy base config — substituting the public key placeholder
+   sed "s|__VM_KEY_PUB__|$PUB_KEY|g" "$REPO_ROOT/tests/vm/nixos-base.nix" \
+     | $SSH_INSTALL "cat > /mnt/etc/nixos/configuration.nix"
+
+   $SSH_INSTALL "nixos-install --no-root-passwd && reboot" || true
+   ```
+
+   Injecting the key via SCP/SSH (rather than shell variable substitution into a heredoc) avoids quoting hazards entirely.
+
+5. **`tests/vm/nixos-base.nix`** — committed NixOS config template for the base VM:
+   - SSH enabled, port 22
+   - `users.users.nixtest.isNormalUser = true` — required for SSH login as a non-root user
+   - `users.users.nixtest.home = "/home/nixtest"` — explicit home directory
+   - `users.users.nixtest.openssh.authorizedKeys.keys = [ "__VM_KEY_PUB__" ]` (placeholder substituted by script)
+   - `nix.settings.experimental-features = ["nix-command" "flakes"]`
+   - `environment.systemPackages = [pkgs.git pkgs.jq]`
+   - No passwords — SSH key only
+   - `hardware.parallels.enable = true` — required for Parallels Tools (shared folders + guest agent)
+   - `nixpkgs.config.allowUnfree = true` — required by `hardware.parallels`
+   - `home-manager` not included at base VM level — it is wired via the test flake's NixOS module
+
+6. **Wait for SSH after reboot** — Poll `ssh -i tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nixtest@<ip>` until connected (60s timeout with progress dots).
+
+7. **Snapshot base state**
+   ```bash
+   prlctl stop "nix-op-secrets-base"
+  prlctl snapshot create "nix-op-secrets-base" --name "clean"
+   ```
+
+## Test Run (`scripts/vm/run-tests.sh`)
+
+**`trap cleanup EXIT` is the very first statement** — registered before any `op item create` call so that partial item creation is always cleaned up on failure.
+
+```bash
+cleanup() {
+  prlctl stop "$TEST_VM" --kill 2>/dev/null || true
+  prlctl delete "$TEST_VM" 2>/dev/null || true
+  for ID in ${FIELD_ID:-} ${SSH_ID:-} ${DOC_ID:-}; do
+    [[ -n "$ID" ]] && op item delete "$ID" --vault nix-op-secrets-test 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+```
+
+**All SSH calls** use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` to handle the rotated host key on each clone. This is safe because these are ephemeral local VMs on a trusted network.
+
+### 1. Clone Base VM
+
+```bash
+TEST_VM="nix-op-secrets-test-$(date +%s)"
+prlctl clone "nix-op-secrets-base" --name "$TEST_VM" --snapshot "clean"
+prlctl start "$TEST_VM"
+```
+
+### 2. Mount Repo + Get IP
+
+Parallels shared folders require Parallels Tools (`hardware.parallels.enable = true` in `nixos-base.nix`). The repo is mounted read-write so `nixos-rebuild` can write the lock file if needed.
+
+```bash
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+prlctl set "$TEST_VM" \
+  --shf-host-add nix-op-secrets \
+  --shf-host-path "$REPO_ROOT" \
+  --shf-host-ro off
+
+# Poll prlctl for a real IP (not "-" or blank) — guest agent is available on
+# the installed system (hardware.parallels.enable = true), but Parallels also
+# reports DHCP-assigned IPs via NAT without requiring it. Use the same robust
+# loop as setup-base.sh for consistency.
+DEADLINE=$(( $(date +%s) + 60 ))
+VM_IP=""
+while [ -z "$VM_IP" ] || [ "$VM_IP" = "-" ]; do
+  [ "$(date +%s)" -ge "$DEADLINE" ] && { echo "Timed out waiting for VM IP"; exit 1; }
+  sleep 3
+  VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header | tr -d ' ')
+done
+
+# Poll SSH until ready
+SSH_OPTS="-i $REPO_ROOT/tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+until ssh $SSH_OPTS nixtest@"$VM_IP" true 2>/dev/null; do
+  printf '.'; sleep 3
+done
+```
+
+Repo available at `/media/psf/nix-op-secrets` inside the VM (Parallels Linux guest mount point).
+
+### 3. Create Test 1Password Items
+
+Items created with the host's `op` CLI using the service account token. IDs are stored in variables referenced by the `cleanup` trap.
+
+```bash
+FIELD_ID=$(op item create \
+  --vault nix-op-secrets-test \
+  --category Login \
+  --title "nix-op-secrets-test-field" \
+  "password=test-field-value" \
+  --format json | jq -r '.id')
+
+SSH_ID=$(op item create \
+  --vault nix-op-secrets-test \
+  --category "SSH Key" \
+  --title "nix-op-secrets-test-ssh" \
+  --format json | jq -r '.id')
+
+DOC_ID=$(op document create "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" \
+  --vault nix-op-secrets-test \
+  --title "nix-op-secrets-test-doc" \
+  --format json | jq -r '.id')
+
+# Template uses tests/vm/fixtures/infra.env.tpl — committed fixture
+# Content: FIELD_VAL={{ op://nix-op-secrets-test/nix-op-secrets-test-field/password }}
+# No item to create — op inject reads the field item directly
+```
+
+### 4. Inject Token into VM
+
+The token is written to a file in the VM. `configuration.nix` sets `op-secrets.serviceAccountTokenFile = "/etc/op-secrets-test-token"`.
+
+```bash
+ssh $SSH_OPTS nixtest@"$VM_IP" \
+  "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null"
+```
+
+### 5. Build and Switch
+
+```bash
+ssh $SSH_OPTS nixtest@"$VM_IP" \
+  "sudo nixos-rebuild switch \
+     --flake /media/psf/nix-op-secrets/tests/vm#test-vm \
+     --override-input op-secrets path:/media/psf/nix-op-secrets \
+     --no-write-lock-file 2>&1"
+```
+
+`--override-input` substitutes the mounted repo path for `op-secrets` at test time. `--no-write-lock-file` prevents Nix from trying to update the committed `flake.lock`, which pins `op-secrets` to the GitHub URL as the canonical reference. This combination means: the lock file stays canonical (GitHub URL), but every test run exercises the actual local checkout.
+
+The stub flake's `configuration.nix` declares all four secret types (vault name is always `nix-op-secrets-test`):
+- `test-field`: `op://nix-op-secrets-test/nix-op-secrets-test-field/password` → `/home/nixtest/.local/secrets/field.txt` (mode 0600)
+- `test-ssh`: `op://nix-op-secrets-test/nix-op-secrets-test-ssh` (sshKey, writePublicKey=true) → `/home/nixtest/.ssh/test-vm-key` (mode 0600, pub 0644)
+- `test-doc`: document vault=`nix-op-secrets-test` item=`nix-op-secrets-test-doc` → `/home/nixtest/.local/secrets/doc.txt` (mode 0600)
+- `test-template`: template=`./fixtures/infra.env.tpl` → `/home/nixtest/.local/secrets/infra.env` (mode 0600)
+
+### 6. Assertions
+
+```bash
+SSH="ssh $SSH_OPTS nixtest@$VM_IP"
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+check_file()    { $SSH "test -f '$1'" || fail "missing: $1"; }
+check_mode()    { MODE=$($SSH "stat -c '%a' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+check_content() { $SSH "grep -q '$2' '$1'" || fail "content mismatch in $1 (expected: $2)"; }
+
+check_file    "/home/nixtest/.local/secrets/field.txt"
+check_mode    "/home/nixtest/.local/secrets/field.txt"     "600"
+check_file    "/home/nixtest/.ssh/test-vm-key"
+check_mode    "/home/nixtest/.ssh/test-vm-key"             "600"
+check_file    "/home/nixtest/.ssh/test-vm-key.pub"
+check_mode    "/home/nixtest/.ssh/test-vm-key.pub"         "644"
+check_file    "/home/nixtest/.local/secrets/doc.txt"
+check_mode    "/home/nixtest/.local/secrets/doc.txt"       "600"
+check_file    "/home/nixtest/.local/secrets/infra.env"
+check_content "/home/nixtest/.local/secrets/infra.env"     "test-field-value"
+
+# Manifest — all five entries (including __pub synthetic key)
+for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
+  $SSH "jq -e '.\"$KEY\"' ~/.local/state/op-secrets/manifest.json" \
+    || fail "manifest missing $KEY"
+done
+
+echo "All VM integration tests passed"
+```
+
+### 7. Teardown
+
+Handled by the `cleanup` trap registered at the start of the script. Always runs, even on failure.
+
+## Stub Flake (`tests/vm/flake.nix`)
+
+```nix
+{
+  description = "nix-op-secrets VM integration test flake";
+
+  inputs = {
+    nixpkgs.url    = "github:nixos/nixpkgs/nixos-25.05";
+    hm.url         = "github:nix-community/home-manager/release-25.05";
+    hm.inputs.nixpkgs.follows = "nixpkgs";
+    # op-secrets pinned to GitHub; overridden at test time with --override-input
+    op-secrets.url = "github:nwlnexus/nix-op-secrets";
+    op-secrets.inputs.nixpkgs.follows = "nixpkgs";
+    darwin.url     = "github:nix-darwin/nix-darwin/nix-darwin-25.05";
+    darwin.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { self, nixpkgs, hm, op-secrets, darwin, ... }: {
+    # Linux automated test target
+    nixosConfigurations.test-vm = nixpkgs.lib.nixosSystem {
+      system = "aarch64-linux";
+      modules = [
+        ./nixos-base.nix
+        hm.nixosModules.home-manager
+        {
+          home-manager.users.nixtest = {
+            imports = [ op-secrets.hmModules.default ];
+            home.stateVersion = "25.05";
+          };
+        }
+        ./configuration.nix
+      ];
+    };
+
+    # macOS manual test target — used by docs/vm-testing-macos.md
+    # TODO: Requires a darwinSystem call. See docs/vm-testing-macos.md for the
+    # required configuration shape. The nix-darwin module is tested manually;
+    # this output is a placeholder until the macOS guide is fully wired up.
+    darwinConfigurations.test-macos = darwin.lib.darwinSystem {
+      system = "aarch64-darwin";
+      modules = [
+        hm.darwinModules.home-manager
+        op-secrets.darwinModules.default
+        ./configuration-macos.nix   # to be created per docs/vm-testing-macos.md
+      ];
+    };
+  };
+}
+```
+
+**Note on `path:` flake input and `flake.lock`:** The committed `flake.lock` pins `op-secrets` using the GitHub URL (`github:nwlnexus/nix-op-secrets`) as the canonical reference — this is what `nix flake lock` will resolve to on the developer's host. At test time inside the VM, `nixos-rebuild` is called with `--override-input op-secrets path:/media/psf/nix-op-secrets --no-write-lock-file`, which substitutes the mounted checkout without modifying the committed lock file. The `op-secrets.url` in `flake.nix` can be set to the GitHub URL (not the `path:` URL); the override takes care of redirecting it at test time.
+
+## macOS VM Guide (`docs/vm-testing-macos.md`)
+
+A committed markdown guide covering every step a developer must follow manually:
+
+1. **Prerequisites** — Parallels Desktop ≥26, macOS IPSW for the target version (downloadable via `softwareupdate --fetch-full-installer`), `op` CLI, `.env` with `OP_SERVICE_ACCOUNT_TOKEN`
+
+2. **Create the VM** — Parallels UI: New → Install macOS from IPSW → name `nix-op-secrets-macos-base` → 4 CPU / 8GB RAM / 60GB disk
+
+3. **First boot** — Complete setup assistant, create user `nixtest`, enable Remote Login in System Settings → General → Sharing (or `sudo systemsetup -setremotelogin on` in Terminal)
+
+4. **Install tooling in the VM:**
+   - Nix: `curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install`
+   - nix-darwin: follow https://github.com/nix-darwin/nix-darwin
+   - 1Password CLI: `brew install 1password-cli`
+
+5. **Configure SSH from host:**
+   ```bash
+   # On the host, after tests/vm/keys/ have been generated:
+   ssh-copy-id -i tests/vm/keys/vm_key.pub nixtest@<vm-ip>
+   # Or manually: append vm_key.pub to VM's ~/.ssh/authorized_keys
+   ```
+
+6. **Snapshot the base state:**
+   ```bash
+   prlctl snapshot create nix-op-secrets-macos-base --name "clean"
+   ```
+
+7. **Create test 1Password items** (same as Linux step 3, run from host):
+   ```bash
+   source .env
+   op item create --vault nix-op-secrets-test --category Login \
+     --title "nix-op-secrets-test-field" "password=test-field-value"
+   # ... SSH Key, Document as in Linux guide
+   ```
+
+8. **Inject token into the VM:**
+   ```bash
+   SSH_OPTS="-i tests/vm/keys/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+   ssh $SSH_OPTS nixtest@<vm-ip> \
+     "printf '%s' '$OP_SERVICE_ACCOUNT_TOKEN' | sudo tee /etc/op-secrets-test-token > /dev/null"
+   ```
+
+9. **Mount repo and run darwin-rebuild:**
+   ```bash
+   prlctl set nix-op-secrets-macos-base \
+     --shf-host-add nix-op-secrets \
+     --shf-host-path "$(pwd)"
+   # Repo available at /Volumes/nix-op-secrets inside macOS VM
+   # --override-input redirects op-secrets to the mounted checkout without
+   # modifying the committed flake.lock
+   ssh $SSH_OPTS nixtest@<vm-ip> \
+     "sudo darwin-rebuild switch \
+       --flake /Volumes/nix-op-secrets/tests/vm#test-macos \
+       --override-input op-secrets path:/Volumes/nix-op-secrets \
+       --no-write-lock-file"
+   ```
+
+10. **Assertions** (same checks as Linux, run over SSH)
+
+11. **Cleanup:**
+    ```bash
+    prlctl snapshot revert nix-op-secrets-macos-base "clean"
+    op item delete <field-id> --vault nix-op-secrets-test
+    # ... delete other items
+    ```
+
+## Error Handling
+
+- All scripts use `set -euo pipefail`
+- `trap cleanup EXIT` is registered as the **first statement** in `run-tests.sh`, before any `op item create` — guarantees VM and 1Password item cleanup even on partial failure
+- Each prereq check prints a specific, actionable error message before exiting
+- SSH connectivity polling has a configurable timeout (default 60s) with progress dots
+- Base VM creation uses a custom installer ISO (SSH key baked in at build time) and SSH-driven install — no guest agent required during provisioning
+- All SSH calls use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` — ephemeral VMs rotate host keys per clone; this is safe for local trusted VMs
+
+## Summary
+
+| Component | Location | Notes |
+|-----------|----------|-------|
+| Entry point | `scripts/test-vm.sh` | Sources `.env`, checks prereqs, calls subscripts |
+| Base VM setup | `scripts/vm/setup-base.sh` | Idempotent, ~10 min first run; SSH-driven install via custom ISO with baked key |
+| Test runner | `scripts/vm/run-tests.sh` | ~3-5 min per run; trap ensures cleanup |
+| Stub flake | `tests/vm/flake.nix` | Linux + macOS outputs; GitHub URL pinned; `--override-input` redirects to mounted repo at test time |
+| NixOS config | `tests/vm/configuration.nix` | Declares all 4 secret types; vault fixed at `nix-op-secrets-test` |
+| Base VM NixOS | `tests/vm/nixos-base.nix` | SSH + flakes + Parallels Tools; `__VM_KEY_PUB__` placeholder |
+| Fixtures | `tests/vm/fixtures/` | `test-doc.txt`, `infra.env.tpl` — committed |
+| SSH keys | `tests/vm/keys/` | Gitignored, generated on first run |
+| ISO cache | `.cache/` | Gitignored |
+| macOS guide | `docs/vm-testing-macos.md` | Full manual walkthrough incl. token injection |
+| Env template | `.env.sample` | Vault name fixed; only token is configurable |
+</file>
+
+<file path="docs/superpowers/specs/nixos-test-design.md">
+# Fast integration test design
+
+**Status:** Existing test (`tests/default.nix`) extended in this branch; VM
+test (`scripts/test-vm.sh`) repositioned as opt-in smoke.
+
+## Background
+
+The repository already had two test layers, one of which was undocumented:
+
+| Layer | Where | Tooling | Time | What it asserts |
+|---|---|---|---|---|
+| **Fast hermetic** | `tests/default.nix` + `tests/mock-op.sh` | `pkgs.runCommand` + mock `op` | ~5 s | activation script, modes, manifest |
+| **Real-API VM** | `scripts/test-vm.sh` + `scripts/vm/*` | Parallels + Ubuntu + real `op` | ~5 min | full home-manager switch with real 1Password |
+
+The fast layer was already wired to `checks.<system>.integration` (so `nix flake check`
+runs it on every supported system) but unmentioned in README/docs. A devil's-advocate
+review of the VM test recommended building a hermetic test exactly like this. We don't
+need to build it — it exists. We need to **document, strengthen, and reposition**.
+
+## Goals
+
+1. **Make the fast test discoverable.** Add to README + CONTRIBUTING. Mention in
+   `docs/vm-testing-macos.md` so contributors reach for the right tool first.
+2. **Close the assertion gap** between the fast test and the VM test, so the VM test
+   adds value only where the real `op` CLI / real cloud / real activation system
+   actually differs from the mock + script.
+3. **Reposition the VM test** as an opt-in real-API smoke. Most regressions should be
+   caught by `nix flake check` in seconds on any platform with Nix.
+
+## What the fast test currently misses (gaps closed in this branch)
+
+| Gap | Status before | Fix |
+|---|---|---|
+| Exact value of field secret | only checked file mode | assert `field.txt` content matches mock's deterministic output for the URI |
+| Document content | only checked mode | assert exact content `mock-document-content` |
+| Template substitution | only checked mode | assert `infra.env` contains `MOCK_KEY=mock-injected-value` (verifies `op inject` was actually invoked) |
+| `__pub` manifest entry | not checked | assert `manifest["test-ssh__pub"]` exists when `writePublicKey = true` |
+| Idempotency / re-switch | not exercised | re-run activation with the same cfg; assert manifest entries unchanged, files unchanged |
+| Orphan removal | not exercised | re-run activation with `test-doc` removed from cfg; assert `doc.txt` is gone and `manifest["test-doc"]` removed |
+
+These all use the existing mock — no new fixtures, no new infra, no test framework changes.
+
+## What stays in the VM test (and only there)
+
+These assertions can only be made against the real environment and are kept in the
+opt-in VM suite:
+
+- Real `op` CLI output format (the mock is necessarily a guess).
+- Real Determinate Nix daemon + standalone Home-Manager `switch` lifecycle.
+- Real systemd / activation ordering on Linux.
+- Real service-account token plumbing (file ownership inherited through `sudo tee`).
+- Real 1Password vault round-trip (would catch a vault rename, an `op` CLI breaking
+  change, a service-account permissions regression).
+
+Everything else — module evaluation, the activation script's logic, manifest correctness,
+template substitution shape, file modes — is now covered hermetically and runs on Linux
+and macOS via `nix flake check`.
+
+## Compared with `pkgs.nixosTest`
+
+The original task brief asked for a `pkgs.nixosTest`. After reading the existing test,
+I argue against it:
+
+- **`pkgs.nixosTest`** boots a full NixOS VM in QEMU. Pros: real systemd, real
+  activation environment, real PAM. Cons: ~30–90 s per run, NixOS-only (the tests don't
+  exercise standalone Home-Manager on Ubuntu, which is the most common real-world
+  configuration), requires KVM in CI.
+- **Existing `pkgs.runCommand` test** runs the same shell script the module emits, in
+  the Nix sandbox, in ~5 s, on every supported system. The only thing it loses is
+  systemd-mediated activation order — and home-manager's user activation isn't
+  systemd-mediated anyway. It runs in the same shell context as a real switch.
+
+Building a `nixosTest` on top would be additive but redundant: the assertions would be
+identical and the upstream-breakage class it catches (NixOS-init changes) is too rare
+to justify the added complexity.
+
+**Decision:** strengthen `tests/default.nix`, don't add a `nixosTest`. Revisit if a
+specific NixOS-only failure mode surfaces in the wild.
+
+## Files changed
+
+- `tests/default.nix` — extended assertions (exact content, idempotency, orphan removal).
+- `tests/mock-op.sh` — `__pub` URI mapping clarified, no functional change.
+- `README.md` — new "Testing" section surfaces the fast test as the default loop.
+- `docs/vm-testing-macos.md` — reframed VM test as opt-in real-API smoke at the top.
+
+## Non-goals
+
+- Replacing `scripts/test-vm.sh`. It still catches the real-cloud regression class.
+- Building negative-path tests in the fast suite (separate follow-up task is captured).
+- Cross-version 1Password CLI matrix testing.
+</file>
+
+<file path="docs/vm-testing-macos.md">
+# macOS VM Testing Guide
+
+> **Use the fast test first.** Most regressions are caught by
+> `nix flake check` in ~5 seconds against a mocked `op` binary, on any
+> platform with Nix — no Parallels, no 1Password account, no VM. See
+> the README "Testing" section. Reach for this guide only when you need
+> to exercise the real `op` CLI and the real 1Password cloud (e.g. before
+> a release, or to verify a CLI/SDK upgrade).
+
+This guide covers the manual steps for testing the `nix-op-secrets` nix-darwin module
+inside a Parallels macOS VM. The Linux (Home-Manager on Ubuntu) path is fully automated via
+`./scripts/test-vm.sh`; macOS requires manual VM setup due to Apple's setup assistant.
+
+> **macOS host only.** Linux/Windows contributors cannot run the macOS path
+> (Parallels and `aarch64-darwin` are macOS-only). The Linux/Home-Manager path
+> is automated end-to-end via `./scripts/test-vm.sh` and is the supported
+> VM-level testing target for non-macOS contributors.
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Apple Silicon Mac | aarch64-darwin |
+| Parallels Desktop ≥26 | **Pro or Business** edition — `prlctl` is not shipped with Standard |
+| Nix on the host | The Linux path runs `nix-shell -p xorriso` to patch the Ubuntu ISO. Determinate installer recommended: `curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \| sh -s -- install` |
+| macOS installer for the VM | `mist download macos <version> --firmware` (from <https://github.com/ninxsoft/mist-cli>) or download an IPSW from <https://ipsw.me>. `softwareupdate --fetch-full-installer` produces an `.app`, not the IPSW Parallels needs. |
+| `op` CLI v2+ | `brew install 1password-cli`; check with `op --version` (must be ≥ 2.0 — v1 syntax is incompatible) |
+| `.env` at repo root | See `.env.sample` — token must have access to `nix-op-secrets-test` vault |
+| VM SSH keypair | Generated by `setup-base.sh` at `${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys/vm_key`, outside any git worktree so the keypair persists across `git worktree remove`. A legacy `tests/vm/keys/` is honoured if it already exists. |
+
+### What to expect
+
+| Stage | Time | Disk |
+|---|---|---|
+| First-time base VM build (Linux/Ubuntu path) | ~20 min | ~3 GB cache (ISOs) + ~5 GB base VM |
+| Per-cycle test run after base is built | ~3–5 min | ~50 MB linked clone (cleaned up automatically) |
+| First macOS VM setup (this guide) | ~30 min | ~30 GB VM image (deep clones; revert via snapshot) |
+
+### Create the test vault and grant service account access
+
+The test suite writes items to a vault named `nix-op-secrets-test`. Your service account
+token must have explicit access to this vault — it is **not** granted automatically, even
+if the token owner's human account created the vault.
+
+**One-time setup:**
+
+```bash
+# 1. Create the vault (as a human user — service accounts cannot create vaults)
+op vault create nix-op-secrets-test
+
+# 2. Grant your service account access via the 1Password web UI:
+#    a. Sign in at https://start.1password.com
+#    b. Go to Developer Tools → Service Accounts → <your service account>
+#    c. Under "Vault Access", click "Add vault" → "nix-op-secrets-test"
+#       (Read & Write permissions required)
+
+# 3. Verify the token can see the vault:
+source .env && op vault get nix-op-secrets-test
+```
+
+If step 3 returns an error, the service account has not been granted access yet.
+
+### Generate SSH keys (if not already present)
+
+If you haven't run the Linux test path first, generate keys manually.
+The default location is outside the worktree so the keypair persists across
+`git worktree remove` (the Parallels base VM's authorized_keys pins one
+specific public key — if the keypair is wiped, every subsequent test fails
+until the base VM is rebuilt).
+
+```bash
+KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+mkdir -p "$KEY_DIR"
+ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
+```
+
+## Steps
+
+### 1. Download a macOS IPSW for the VM
+
+`softwareupdate --fetch-full-installer` downloads an Installer **app**, not the
+IPSW that Parallels needs. Use `mist-cli` (Homebrew) or ipsw.me:
+
+```bash
+# Option A: mist-cli
+brew install mist-cli
+mist download firmware "15"        # latest macOS 15 IPSW
+
+# Option B: ipsw.me (browser)
+#   https://ipsw.me/VirtualMac2,1   ← pick a build, download the .ipsw
+```
+
+Note the path of the resulting `.ipsw` — you'll point Parallels at it next.
+
+### 2. Create the VM in Parallels
+
+Open Parallels Desktop → **File → New** → **Install macOS from IPSW** → select the IPSW.
+
+Settings:
+- Name: `nix-op-secrets-macos-base`
+- CPUs: 4
+- Memory: 8 GB
+- Disk: 60 GB
+
+### 3. Complete setup assistant
+
+Boot the VM, complete the macOS setup assistant, create user **`nixtest`** with admin privileges.
+
+Enable Remote Login (required for SSH):
+
+```bash
+# In the VM's Terminal:
+sudo systemsetup -setremotelogin on
+```
+
+### 4. Install tooling in the VM
+
+```bash
+# In the VM's Terminal:
+
+# Nix (Determinate Systems installer — sets up flakes by default)
+curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+  | sh -s -- install
+
+# 1Password CLI
+brew install 1password-cli
+```
+
+> No need to install nix-darwin manually inside the VM. Step 9 below invokes
+> `nix run github:nix-darwin/nix-darwin -- switch --flake ...` which fetches
+> `darwin-rebuild` from the flake and uses our test configuration directly —
+> no separate bootstrap is required.
+
+### 5. Authorise SSH from host
+
+From the **host machine** (after SSH keys have been generated):
+
+```bash
+KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+VM_IP=<check Parallels UI or prlctl list -o ip>
+
+ssh-copy-id -i "$KEY_DIR/vm_key.pub" nixtest@"$VM_IP"
+# Alternatively, append "$KEY_DIR/vm_key.pub" to ~/.ssh/authorized_keys in the VM
+```
+
+Test connectivity:
+
+```bash
+ssh -i "$KEY_DIR/vm_key" $SSH_OPTS nixtest@"$VM_IP" echo "SSH OK"
+```
+
+### 6. Snapshot the base state
+
+```bash
+prlctl snapshot nix-op-secrets-macos-base --name "clean"
+```
+
+### 7. Create test 1Password items
+
+From the **host machine** (with `.env` sourced):
+
+```bash
+source .env
+
+VAULT="nix-op-secrets-test"
+
+FIELD_ID=$(op item create \
+  --vault "$VAULT" --category Login \
+  --title "nix-op-secrets-test-field" \
+  "password=test-field-value" \
+  --format json | jq -r '.id')
+
+SSH_ID=$(op item create \
+  --vault "$VAULT" --category "SSH Key" \
+  --title "nix-op-secrets-test-ssh" \
+  --format json | jq -r '.id')
+
+DOC_ID=$(op document create tests/vm/fixtures/test-doc.txt \
+  --vault "$VAULT" \
+  --title "nix-op-secrets-test-doc" \
+  --format json | jq -r '.id')
+
+echo "FIELD_ID=$FIELD_ID  SSH_ID=$SSH_ID  DOC_ID=$DOC_ID"
+# Save these — needed for cleanup in step 11
+```
+
+### 8. Inject service account token into VM
+
+The token is sent over SSH stdin so it never appears on the command line
+(visible to `ps`) or expands shell metacharacters.
+
+```bash
+KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+SSH_OPTS="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+source .env
+
+printf '%s' "$OP_SERVICE_ACCOUNT_TOKEN" | ssh $SSH_OPTS nixtest@"$VM_IP" \
+  "sudo tee /etc/op-secrets-test-token >/dev/null \
+    && sudo chown nixtest:nixtest /etc/op-secrets-test-token \
+    && sudo chmod 600 /etc/op-secrets-test-token"
+```
+
+### 9. Mount repo and run darwin-rebuild
+
+```bash
+# Mount the repo as a Parallels shared folder
+prlctl set nix-op-secrets-macos-base \
+  --shf-host-add nix-op-secrets \
+  --shf-host-path "$(pwd)"
+# The repo is now available at /Volumes/nix-op-secrets inside the VM
+
+# Run darwin-rebuild switch from the host over SSH
+# --override-input redirects op-secrets to the mounted checkout without
+# modifying the committed flake.lock
+ssh $SSH_OPTS nixtest@"$VM_IP" \
+  "sudo darwin-rebuild switch \
+    --flake /Volumes/nix-op-secrets/tests/vm#test-macos \
+    --override-input op-secrets path:/Volumes/nix-op-secrets \
+    --no-write-lock-file"
+```
+
+### 10. Run assertions
+
+> **Note:** macOS uses `stat -f '%OLp'` (BSD stat) rather than `stat -c '%a'` (GNU stat used in the Linux scripts). Use the commands below as-is.
+
+Same checks as the Linux automated path, executed over SSH:
+
+```bash
+SSH="ssh $SSH_OPTS nixtest@$VM_IP"
+fail()          { echo "FAIL: $1" >&2; exit 1; }
+check_file()    { $SSH "test -f '$1'" || fail "missing: $1"; }
+check_mode()    { MODE=$($SSH "stat -f '%OLp' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+check_content() { $SSH "grep -qF '$2' '$1'" || fail "expected '$2' in $1"; }
+
+check_file    "/Users/nixtest/.local/secrets/field.txt"
+check_mode    "/Users/nixtest/.local/secrets/field.txt" "600"
+check_file    "/Users/nixtest/.ssh/test-vm-key"
+check_mode    "/Users/nixtest/.ssh/test-vm-key" "600"
+check_file    "/Users/nixtest/.ssh/test-vm-key.pub"
+check_mode    "/Users/nixtest/.ssh/test-vm-key.pub" "644"
+check_file    "/Users/nixtest/.local/secrets/doc.txt"
+check_mode    "/Users/nixtest/.local/secrets/doc.txt" "600"
+check_file    "/Users/nixtest/.local/secrets/infra.env"
+check_mode    "/Users/nixtest/.local/secrets/infra.env" "600"
+check_content "/Users/nixtest/.local/secrets/infra.env" "test-field-value"
+
+for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
+  $SSH "jq -e '.\"$KEY\"' /Users/nixtest/.local/state/op-secrets/manifest.json" > /dev/null \
+    || fail "manifest missing: $KEY"
+done
+
+echo "All macOS VM integration tests passed"
+```
+
+### 11. Cleanup
+
+```bash
+# Revert VM to clean snapshot (ready for next test run)
+prlctl snapshot-switch nix-op-secrets-macos-base --id "$(prlctl snapshot-list \
+  nix-op-secrets-macos-base -j | jq -r 'to_entries[]|select(.value.name=="clean")|.key')"
+
+# Delete test 1Password items
+source .env
+op item delete "$FIELD_ID" --vault nix-op-secrets-test
+op item delete "$SSH_ID"   --vault nix-op-secrets-test
+op item delete "$DOC_ID"   --vault nix-op-secrets-test
+```
+
+## Troubleshooting
+
+**SSH key auth rejected.** The autoinstall (Linux path) injects the host's
+public key via subiquity's `ssh.authorized-keys`. If that fails, check the VM
+console: `prlctl capture nix-op-secrets-base --file /tmp/vm.png` and open
+`/tmp/vm.png`. The most common cause is a missing `autoinstall` kernel
+parameter — `setup-base.sh` patches this into the GRUB config of the cached
+ISO; delete `.cache/ubuntu-*-autoinstall.iso` to force a rebuild.
+
+**`prlctl list … -o ip` is empty even though the VM is up.** Parallels needs
+1–15 minutes to surface a DHCP lease via `prlctl` on first boot. `setup-base.sh`
+waits up to 1800 s. If a run times out, the VM probably *did* get an IP — check
+manually with `prlctl list nix-op-secrets-base -o ip --no-header` after a minute.
+
+**Stuck or orphan VM.** Force-cleanup with:
+
+```bash
+prlctl stop   nix-op-secrets-base --kill 2>/dev/null
+prlctl delete nix-op-secrets-base
+rm -rf .cache/autoinstall-seed.iso             # forces fresh seed ISO
+```
+
+**Home-Manager activation log.** Inside the VM, look in
+`/home/nixtest/.local/state/op-secrets/` for `manifest.json` (what's been
+written) and the systemd journal for `home-manager` units. The activation
+script writes to stderr/stdout, captured in the `nix run home-manager …`
+output during a switch.
+
+**Another run is in progress.** `run-tests.sh` acquires
+`/tmp/nix-op-secrets-vm-test.lock` to prevent concurrent runs (which would
+race on the shared 1Password vault). Remove the directory manually if a
+previous run died without cleanup.
+
+## CI
+
+The Linux automated path (`scripts/test-vm.sh`) is **macOS-host only** because
+it drives Parallels. To run in CI you need a self-hosted macOS runner with
+Parallels Desktop installed and `prlctl` on PATH; GitHub-hosted runners do not
+support nested virtualisation for Parallels.
+
+The service account token **must** be stored as a masked secret. With GitHub
+Actions:
+
+```yaml
+- name: Run VM integration tests
+  env:
+    OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+  run: |
+    printf 'OP_SERVICE_ACCOUNT_TOKEN=%s\n' "$OP_SERVICE_ACCOUNT_TOKEN" > .env
+    ./scripts/test-vm.sh
+```
+
+**Never** hardcode the token in workflow YAML or commit it to `.env`. The
+`.gitignore` already excludes `.env`; verify before pushing.
+</file>
+
+<file path="lib/mk-activation.nix">
+# lib/mk-activation.nix
+# Returns a pkgs.writeShellScript derivation.
+# String-interpolating the derivation in a shell snippet yields its executable store path.
+#
+# Parameters:
+#   pkgs              — nixpkgs instance (real or fake for testing)
+#   lib               — nixpkgs lib
+#   cfg               — the op-secrets config attrset
+#   isSystemActivation — true when called from darwin.nix (root → user boundary)
+{ pkgs, lib, cfg, isSystemActivation ? false }:
+
+let
+  op = "${pkgs._1password-cli}/bin/op";
+
+  # Generate one fetch_secret call per declared secret.
+  # IMPORTANT: template is checked first (before type dispatch) because template
+  # is orthogonal to type — a secret can have type="field" and also set template.
+  mkSecretCommand = name: secret:
+    let
+      typeArg     = if secret.template != null then "template" else secret.type;
+      sourceArg   = if secret.source   != null then secret.source   else "";
+      vaultArg    = if secret.vault    != null then secret.vault    else "";
+      itemArg     = if secret.item     != null then secret.item     else "";
+      templateArg = if secret.template != null then toString secret.template else "";
+      accountArg  = if secret.account  != null then secret.account  else "";
+      tokenCmdArg = if secret.serviceAccountTokenCommand != null
+                    then secret.serviceAccountTokenCommand
+                    else "";
+    in ''
+      fetch_secret \
+        ${lib.escapeShellArg name} \
+        ${lib.escapeShellArg typeArg} \
+        ${lib.escapeShellArg sourceArg} \
+        ${lib.escapeShellArg vaultArg} \
+        ${lib.escapeShellArg itemArg} \
+        ${lib.escapeShellArg templateArg} \
+        ${lib.escapeShellArg secret.dest} \
+        ${lib.escapeShellArg secret.mode} \
+        ${if secret.writePublicKey then "1" else "0"} \
+        ${lib.escapeShellArg accountArg} \
+        ${lib.escapeShellArg tokenCmdArg}
+    '';
+
+  # True iff any declared secret carries its own account or token-command.
+  # When per-secret auth is in use, the module-level auth probe is downgraded
+  # to a soft check (so module-level account/token don't need to be set just
+  # to satisfy the probe).
+  anyPerSecretAuth = lib.any
+    (s: s.account != null || s.serviceAccountTokenCommand != null)
+    (lib.attrValues cfg.secrets);
+
+  secretCommands = lib.concatStringsSep "\n" (
+    lib.mapAttrsToList mkSecretCommand cfg.secrets
+  );
+
+  secretNames = lib.concatStringsSep "\n" (
+    lib.concatMap (name:
+      let secret = cfg.secrets.${name};
+      in if secret.type == "sshKey" && secret.writePublicKey
+         then [ name "${name}__pub" ]
+         else [ name ]
+    ) (lib.attrNames cfg.secrets)
+  );
+
+  manifestJqArgs = lib.concatStringsSep " \\\n    " (
+    lib.concatMap (name:
+      let secret = cfg.secrets.${name};
+          base = "--arg ${lib.escapeShellArg name} ${lib.escapeShellArg secret.dest}";
+          pubEntry = if secret.type == "sshKey" && secret.writePublicKey
+                     then [ base "--arg ${lib.escapeShellArg "${name}__pub"} ${lib.escapeShellArg "${secret.dest}.pub"}" ]
+                     else [ base ];
+      in pubEntry
+    ) (lib.attrNames cfg.secrets)
+  );
+
+in pkgs.writeShellScript "op-secrets-activate" ''
+  set -euo pipefail
+  umask 077
+
+  OP=${lib.escapeShellArg op}
+  MODULE_ACCOUNT=${lib.escapeShellArg (if cfg.account != null then cfg.account else "")}
+  SERVICE_ACCOUNT_TOKEN_FILE=${lib.escapeShellArg (
+    if cfg.serviceAccountTokenFile != null then cfg.serviceAccountTokenFile else ""
+  )}
+  CONNECT_HOST=${lib.escapeShellArg (if cfg.connectHost != null then cfg.connectHost else "")}
+  CONNECT_TOKEN_FILE=${lib.escapeShellArg (
+    if cfg.connectTokenFile != null then cfg.connectTokenFile else ""
+  )}
+  ANY_PER_SECRET_AUTH=${if anyPerSecretAuth then "1" else "0"}
+  IS_SYSTEM_ACTIVATION=${if isSystemActivation then "1" else "0"}
+  ${lib.optionalString isSystemActivation ''
+  ACTIVATION_USER=${lib.escapeShellArg cfg.user}
+  ACTIVATION_GROUP=${lib.escapeShellArg cfg.group}
+  ''}
+
+  # ── Account / auth args ──────────────────────────────────────────────────────
+  ACCOUNT="''${OP_ACCOUNT:-$MODULE_ACCOUNT}"
+  OP_ARGS=()
+  [[ -n "$ACCOUNT" ]] && OP_ARGS+=(--account "$ACCOUNT")
+
+  # ── Helpers ──────────────────────────────────────────────────────────────────
+  # Defined before the auth block so run_op can be used in the whoami probe.
+  run_op() {
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" --preserve-env=OP_SERVICE_ACCOUNT_TOKEN -- "$OP" "''${OP_ARGS[@]}" "$@"
+    else
+      "$OP" "''${OP_ARGS[@]}" "$@"
+    fi
+  }
+
+  run_op_document() {
+    # document get writes to --output path; needs umask in the child process
+    local item="$1" vault="$2" dest_tmp="$3"
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      # Pass OP as $0 and all args positionally to avoid injection via sh -c string interpolation
+      sudo -u "$ACTIVATION_USER" \
+        --preserve-env=OP_SERVICE_ACCOUNT_TOKEN \
+        sh -c 'umask 077; exec "$0" "''${@}"' \
+        "$OP" "''${OP_ARGS[@]}" document get "$item" --vault "$vault" --output "$dest_tmp"
+    else
+      "$OP" "''${OP_ARGS[@]}" document get "$item" --vault "$vault" --output "$dest_tmp"
+    fi
+  }
+
+  run_op_inject() {
+    # inject writes to --output path; needs umask in the child process
+    local template_path="$1" dest_tmp="$2"
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" \
+        --preserve-env=OP_SERVICE_ACCOUNT_TOKEN \
+        sh -c 'umask 077; exec "$0" "''${@}"' \
+        "$OP" "''${OP_ARGS[@]}" inject -i "$template_path" -o "$dest_tmp"
+    else
+      "$OP" "''${OP_ARGS[@]}" inject -i "$template_path" -o "$dest_tmp"
+    fi
+  }
+
+  # ── Auth ─────────────────────────────────────────────────────────────────────
+  # Priority order (first match wins):
+  #   1. OP_SERVICE_ACCOUNT_TOKEN already in env
+  #   2. serviceAccountTokenFile option → OP_SERVICE_ACCOUNT_TOKEN
+  #   3. Connect: effective host + token resolved independently
+  #              (each half: env takes priority over configured file/value)
+  #   4. Existing op session (whoami)
+  #   5. Per-secret auth (each secret handles itself)
+  #   6. Interactive op signin (requires TTY; fails in system activation)
+
+  # Resolve effective Connect credentials before the if/elif chain.
+  # Each half is resolved independently so mixed env+config combinations work.
+  _eff_connect_host="''${OP_CONNECT_HOST:-$CONNECT_HOST}"
+  _eff_connect_token=""
+  if [[ -n "''${OP_CONNECT_TOKEN:-}" ]]; then
+    _eff_connect_token="$OP_CONNECT_TOKEN"
+  elif [[ -n "$CONNECT_TOKEN_FILE" && -f "$CONNECT_TOKEN_FILE" ]]; then
+    _eff_connect_token="$(cat "$CONNECT_TOKEN_FILE")"
+  fi
+
+  if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+    : # service account token already in env — op picks it up natively
+    unset OP_CONNECT_HOST OP_CONNECT_TOKEN
+  elif [[ -n "$SERVICE_ACCOUNT_TOKEN_FILE" && -f "$SERVICE_ACCOUNT_TOKEN_FILE" ]]; then
+    OP_SERVICE_ACCOUNT_TOKEN="$(cat "$SERVICE_ACCOUNT_TOKEN_FILE")"
+    export OP_SERVICE_ACCOUNT_TOKEN
+    unset OP_CONNECT_HOST OP_CONNECT_TOKEN
+  elif [[ -n "$_eff_connect_host" && -n "$_eff_connect_token" ]]; then
+    OP_CONNECT_HOST="$_eff_connect_host"
+    OP_CONNECT_TOKEN="$_eff_connect_token"
+    export OP_CONNECT_HOST OP_CONNECT_TOKEN
+    unset OP_SERVICE_ACCOUNT_TOKEN
+  elif run_op whoami &>/dev/null; then
+    : # already authenticated via existing op session
+  elif [[ "$ANY_PER_SECRET_AUTH" == "1" ]]; then
+    : # per-secret auth will be applied by fetch_secret
+  else
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      echo "op-secrets: system activation requires a service account token or Connect credentials" >&2
+      echo "op-secrets: set OP_SERVICE_ACCOUNT_TOKEN / serviceAccountTokenFile, or OP_CONNECT_HOST+OP_CONNECT_TOKEN / connectHost+connectTokenFile" >&2
+      exit 1
+    fi
+    echo "op-secrets: not authenticated — running op signin" >&2
+    echo "op-secrets: NOTE: interactive signin requires a TTY; use a service account token or Connect for non-interactive contexts" >&2
+    "$OP" signin "''${OP_ARGS[@]}" || {
+      echo "op-secrets: authentication failed — aborting" >&2
+      exit 1
+    }
+  fi
+
+  # ── Secret handlers ──────────────────────────────────────────────────────────
+  fetch_secret() {
+    local name="$1" eff_type="$2" source="$3" vault="$4" item="$5" \
+          template="$6" dest="$7" mode="$8" write_pub="$9" \
+          sec_account="''${10:-}" sec_token_cmd="''${11:-}"
+    local dest_tmp="''${dest}.tmp"
+
+    # Per-secret OP_ARGS / OP_SERVICE_ACCOUNT_TOKEN override.
+    # Save current state, apply secret-scoped overrides; we restore at the
+    # end of this function on success. On failure, set -e exits the script,
+    # so restoration is unnecessary.
+    local _saved_op_args=("''${OP_ARGS[@]}")
+    local _saved_token_was_set=0
+    local _saved_token=""
+    if [[ -n "''${OP_SERVICE_ACCOUNT_TOKEN+x}" ]]; then
+      _saved_token_was_set=1
+      _saved_token="$OP_SERVICE_ACCOUNT_TOKEN"
+    fi
+
+    if [[ -n "$sec_account" ]]; then
+      OP_ARGS=(--account "$sec_account")
+      # Service-account tokens are account-scoped, so the module-level
+      # token (issued for `op-secrets.account`) is invalid against a
+      # different per-secret account. Unset it; the fetch will fall back
+      # to whatever interactive op session exists for $sec_account
+      # unless a per-secret token-command supplies a matching token.
+      unset OP_SERVICE_ACCOUNT_TOKEN
+    fi
+    if [[ -n "$sec_token_cmd" ]]; then
+      local _tok
+      if ! _tok="$(bash -c "$sec_token_cmd")" || [[ -z "$_tok" ]]; then
+        echo "op-secrets: secret '$name': serviceAccountTokenCommand produced no token" >&2
+        exit 1
+      fi
+      OP_SERVICE_ACCOUNT_TOKEN="$_tok"
+      export OP_SERVICE_ACCOUNT_TOKEN
+    fi
+
+    if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+      sudo -u "$ACTIVATION_USER" mkdir -p "$(dirname "$dest")"
+    else
+      mkdir -p "$(dirname "$dest")"
+    fi
+
+    case "$eff_type" in
+      template)
+        # op inject: template path is a Nix store path (world-readable skeleton only)
+        run_op_inject "$template" "$dest_tmp"
+        mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
+        chmod "$mode" "$dest"
+        ;;
+      field)
+        run_op read "$source" > "$dest_tmp"
+        mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
+        chmod "$mode" "$dest"
+        ;;
+      document)
+        run_op_document "$item" "$vault" "$dest_tmp"
+        mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
+        chmod "$mode" "$dest"
+        ;;
+      sshKey)
+        # Field names are exact — lowercase with space; required by op CLI
+        run_op read "''${source}/private key" > "$dest_tmp"
+        mv "$dest_tmp" "$dest"
+        if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+          chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "$dest"
+        fi
+        chmod 0600 "$dest"  # forced; mode option is ignored for private keys
+        if [[ "$write_pub" == "1" ]]; then
+          run_op read "''${source}/public key" > "''${dest}.pub.tmp"
+          mv "''${dest}.pub.tmp" "''${dest}.pub"
+          if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+            chown "$ACTIVATION_USER:$ACTIVATION_GROUP" "''${dest}.pub"
+          fi
+          chmod 0644 "''${dest}.pub"
+        fi
+        ;;
+      *)
+        echo "op-secrets: unknown effective type '$eff_type' for secret '$name'" >&2
+        exit 1
+        ;;
+    esac
+
+    # Restore module-level auth state (only reached on success — set -e
+    # exits the script on any failure above).
+    OP_ARGS=("''${_saved_op_args[@]}")
+    if [[ "$_saved_token_was_set" == "1" ]]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$_saved_token"
+      export OP_SERVICE_ACCOUNT_TOKEN
+    else
+      unset OP_SERVICE_ACCOUNT_TOKEN
+    fi
+
+    echo "op-secrets: wrote $name → $dest"
+  }
+
+  # ── Manifest ─────────────────────────────────────────────────────────────────
+  if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+    # dscl is macOS-only; fall back to getent on Linux
+    if command -v dscl &>/dev/null; then
+      USER_HOME=$(dscl . -read "/Users/$ACTIVATION_USER" NFSHomeDirectory | awk '{print $2}')
+    else
+      USER_HOME=$(getent passwd "$ACTIVATION_USER" | cut -d: -f6)
+    fi
+  else
+    USER_HOME="$HOME"
+  fi
+  MANIFEST_DIR="$USER_HOME/.local/state/op-secrets"
+  MANIFEST="$MANIFEST_DIR/manifest.json"
+
+  OLD_MANIFEST="{}"
+  [[ -f "$MANIFEST" ]] && OLD_MANIFEST="$(cat "$MANIFEST")"
+
+  # Orphan cleanup: remove files for secrets no longer in config
+  NEW_NAMES=$(printf '%s\n' ${lib.escapeShellArg secretNames})
+  echo "$OLD_MANIFEST" \
+    | ${pkgs.jq}/bin/jq -r 'to_entries[] | "\(.key)\t\(.value)"' \
+    | while IFS=$'\t' read -r key path; do
+        if ! printf '%s\n' "$NEW_NAMES" | grep -qxF "$key"; then
+          if [[ -f "$path" ]]; then
+            rm -f "$path"
+            echo "op-secrets: removed orphaned secret '$key' ($path)"
+          fi
+        fi
+      done
+
+  # ── Fetch all secrets (fail-fast — any error exits immediately via set -e) ──
+  ${secretCommands}
+
+  # ── Write manifest only on full success ───────────────────────────────────
+  if [[ "$IS_SYSTEM_ACTIVATION" == "1" ]]; then
+    sudo -u "$ACTIVATION_USER" mkdir -p "$MANIFEST_DIR"
+    ${pkgs.jq}/bin/jq -n '$ARGS.named' \
+      ${manifestJqArgs} \
+      | sudo -u "$ACTIVATION_USER" tee "$MANIFEST" > /dev/null
+  else
+    mkdir -p "$MANIFEST_DIR"
+    ${pkgs.jq}/bin/jq -n '$ARGS.named' \
+      ${manifestJqArgs} \
+      > "$MANIFEST"
+  fi
+  echo "op-secrets: activation complete"
+''
+</file>
+
+<file path="lib/options.nix">
+# lib/options.nix
+{ lib }:
+lib.types.submodule {
+  options = {
+    type = lib.mkOption {
+      type    = lib.types.enum [ "field" "document" "sshKey" ];
+      default = "field";
+      description = lib.mdDoc or (x: x) ''
+        The 1Password item type. Determines which `op` CLI command fetches the secret.
+        - `field`: reads a single text/concealed field via `op read`
+        - `document`: retrieves a file stored as a 1Password Document via `op document get`
+        - `sshKey`: reads an SSH Key item; enforces `0600` on the private key
+        Note: if `template` is also set, `template` takes precedence over `type`.
+      '';
+      example = "sshKey";
+    };
+
+    source = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        1Password URI for the secret. Format depends on type:
+        - `field`: `op://vault/item/field`
+        - `sshKey`: `op://vault/item` — no field segment; the module derives
+          `/private key` and `/public key` automatically.
+        - `document`: not used — set `vault` and `item` instead.
+        Mutually exclusive with `template`.
+      '';
+      example = "op://Personal/GitHub SSH Key";
+    };
+
+    vault = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) "1Password vault name. Required for `document` type only.";
+      example = "Work";
+    };
+
+    item = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) "1Password item name. Required for `document` type only.";
+      example = "Corp Root CA";
+    };
+
+    template = lib.mkOption {
+      type    = lib.types.nullOr lib.types.path;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        Nix store path to an `op inject` template file containing `op://` references.
+        When set, `op inject` is used instead of the `type` dispatch. Mutually exclusive
+        with `source`. Templates must contain only `op://` URIs — the Nix store is
+        world-readable, so never embed literal secret values in template files.
+      '';
+      example = ./secrets/infra.env.tpl;
+    };
+
+    dest = lib.mkOption {
+      type    = lib.types.str;
+      description = lib.mdDoc or (x: x) ''
+        Absolute path where the secret will be written. Must start with `/`.
+        Do not use `~/` — use `config.home.homeDirectory` in Home Manager configs.
+      '';
+      example = "/Users/me/.ssh/github_ed25519";
+    };
+
+    mode = lib.mkOption {
+      type    = lib.types.str;
+      default = "0600";
+      description = lib.mdDoc or (x: x) ''
+        File permission mode (chmod format). Ignored for the private key of `sshKey`
+        type — that is always forced to `0600`.
+      '';
+      example = "0644";
+    };
+
+    writePublicKey = lib.mkOption {
+      type    = lib.types.bool;
+      default = false;
+      description = lib.mdDoc or (x: x) ''
+        `sshKey` type only. When true, also writes the public key to `dest + ".pub"`
+        at mode `0644`. The public key is in `authorized_keys` format.
+      '';
+      example = true;
+    };
+
+    account = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        Per-secret 1Password account override. When set, this account is used
+        instead of the module-level `op-secrets.account` for fetching this secret.
+        Lets a single `op-secrets` config pull secrets from multiple 1Password
+        accounts (e.g. a personal account and a work account).
+
+        Important: service-account tokens are account-scoped. When this option
+        is set without a matching `serviceAccountTokenCommand`, the module-level
+        token (from `OP_SERVICE_ACCOUNT_TOKEN` or `serviceAccountTokenFile`) is
+        explicitly *unset* for this secret's fetch, because it would be invalid
+        against a different account. The fetch will use whatever interactive
+        `op` session exists for the per-secret account. For fully autonomous
+        runs, supply a per-secret token via `serviceAccountTokenCommand` — or
+        keep every secret on the same account so the module-level token applies.
+      '';
+      example = "my.1password.com";
+    };
+
+    serviceAccountTokenCommand = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc or (x: x) ''
+        Per-secret service-account-token source. A shell command run at
+        activation time whose stdout is exported as `OP_SERVICE_ACCOUNT_TOKEN`
+        for this secret's fetch only. Useful when the token lives in a
+        `KEY=value` `.env` file or any non-raw format that
+        `serviceAccountTokenFile` (which expects a raw token file) can't
+        consume directly. Example to read from a `.env`:
+        `grep -E '^OP_SERVICE_ACCOUNT_TOKEN=' ~/projects/personal/.env | head -n1 | cut -d= -f2- | tr -d '"' | tr -d "'"`
+      '';
+      example = "cat ~/.config/op/personal-token";
+    };
+  };
+}
+</file>
+
+<file path="lib/validate.nix">
+# lib/validate.nix
+# Returns a list of Nix module assertions for all declared secrets.
+# Usage: assertions = (import ../lib/validate.nix) { inherit lib secrets; };
+{ lib, secrets, moduleName ? "op-secrets" }:
+lib.concatMap
+  (name:
+    let
+      cfg = secrets.${name};
+      pfx = "${moduleName}: secret '${name}'";
+    in [
+      {
+        assertion = !(cfg.source != null && cfg.template != null);
+        message   = "${pfx}: 'source' and 'template' are mutually exclusive";
+      }
+      {
+        assertion = cfg.type == "document"
+          || cfg.source != null
+          || cfg.template != null;
+        message   = "${pfx}: 'source' or 'template' is required for type '${cfg.type}'";
+      }
+      {
+        assertion = cfg.type != "document"
+          || (cfg.vault != null && cfg.item != null);
+        message   = "${pfx}: 'vault' and 'item' are required for type 'document'";
+      }
+      {
+        assertion = cfg.type != "document" || cfg.source == null;
+        message   = "${pfx}: 'source' must not be set for type 'document'; use 'vault' and 'item'";
+      }
+      {
+        # sshKey source must be op://vault/item — no third path component (field segment)
+        assertion =
+          cfg.type != "sshKey"
+          || cfg.source == null
+          || (let parts = lib.splitString "/" (lib.removePrefix "op://" cfg.source);
+              in builtins.length parts == 2);
+        message = "${pfx}: 'source' for sshKey must be 'op://vault/item' (no field segment)";
+      }
+      {
+        assertion = !cfg.writePublicKey || cfg.type == "sshKey";
+        message   = "${pfx}: 'writePublicKey' is only valid for type 'sshKey'";
+      }
+      {
+        assertion = lib.hasPrefix "/" cfg.dest;
+        message   = "${pfx}: 'dest' must be an absolute path (got '${cfg.dest}')";
+      }
+    ])
+  (lib.attrNames secrets)
+</file>
+
+<file path="modules/darwin.nix">
+{ lib, pkgs, config, ... }:
+let
+  cfg        = config.op-secrets;
+  secretSpec = import ../lib/options.nix  { inherit lib; };
+  validate   = import ../lib/validate.nix;
+  mkActivation = import ../lib/mk-activation.nix;
+in {
+  options.op-secrets = {
+    enable = lib.mkEnableOption "1Password secrets activation (system-level)";
+
+    account = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        1Password sign-in address. Overridden by `OP_ACCOUNT` env var at runtime.
+      '';
+      example = "my.1password.com";
+    };
+
+    serviceAccountTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        Path to a file containing a 1Password service account token.
+        Mutually exclusive with `connectHost` / `connectTokenFile`.
+      '';
+    };
+
+    connectHost = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        URL of a 1Password Connect server (e.g. `https://connect.example.com:8080`).
+        Must be set together with `connectTokenFile`. Mutually exclusive with
+        `serviceAccountTokenFile`. Sets `OP_CONNECT_HOST` at activation time.
+      '';
+      example = "https://op-connect.internal:8080";
+    };
+
+    connectTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = lib.mdDoc ''
+        Path to a file containing the 1Password Connect API token. Must be set
+        together with `connectHost`. Mutually exclusive with `serviceAccountTokenFile`.
+        Sets `OP_CONNECT_TOKEN` at activation time.
+      '';
+      example = "/run/secrets/op-connect-token";
+    };
+
+    user = lib.mkOption {
+      type    = lib.types.str;
+      description = lib.mdDoc ''
+        The macOS user to run `op` as and to own the written files. nix-darwin system
+        activation runs as root — this user is substituted into all `op` calls via
+        `sudo -u`.
+      '';
+      example = "alice";
+    };
+
+    group = lib.mkOption {
+      type    = lib.types.str;
+      default = "staff";
+      description = lib.mdDoc "Group owner for written files. Defaults to `staff`.";
+    };
+
+    secrets = lib.mkOption {
+      type    = lib.types.attrsOf secretSpec;
+      default = {};
+      description = lib.mdDoc "Named secret declarations.";
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    assertions = validate {
+      inherit lib;
+      secrets    = cfg.secrets;
+      moduleName = "op-secrets (darwin)";
+    } ++ [
+      {
+        assertion = !(cfg.serviceAccountTokenFile != null && (cfg.connectHost != null || cfg.connectTokenFile != null));
+        message   = "op-secrets (darwin): 'serviceAccountTokenFile' and connect options ('connectHost'/'connectTokenFile') are mutually exclusive";
+      }
+      {
+        assertion = (cfg.connectHost == null) == (cfg.connectTokenFile == null);
+        message   = "op-secrets (darwin): 'connectHost' and 'connectTokenFile' must both be set or both be null";
+      }
+    ];
+
+    system.activationScripts.op-secrets.text = ''
+      echo "op-secrets: fetching secrets for user ${cfg.user}"
+      ${mkActivation { inherit pkgs lib cfg; isSystemActivation = true; }}
+    '';
+  };
+}
+</file>
+
+<file path="modules/hm.nix">
+{ lib, pkgs, config, ... }:
+let
+  cfg        = config.op-secrets;
+  secretSpec = import ../lib/options.nix  { inherit lib; };
+  validate   = import ../lib/validate.nix;
+  mkActivation = import ../lib/mk-activation.nix;
+in {
+  options.op-secrets = {
+    enable = lib.mkEnableOption "1Password secrets activation";
+
+    account = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        1Password sign-in address (e.g. `my.1password.com`). `null` uses the most
+        recently used account. Overridden at runtime by the `OP_ACCOUNT` env var.
+      '';
+      example = "my.1password.com";
+    };
+
+    serviceAccountTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Path to a file containing a 1Password service account token. For headless
+        hosts without a desktop app. Overridden by `OP_SERVICE_ACCOUNT_TOKEN` env var.
+        Mutually exclusive with `connectHost` / `connectTokenFile`.
+      '';
+      example = "/run/secrets/op-token";
+    };
+
+    connectHost = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        URL of a 1Password Connect server (e.g. `https://connect.example.com:8080`).
+        Must be set together with `connectTokenFile`. Mutually exclusive with
+        `serviceAccountTokenFile`. Sets `OP_CONNECT_HOST` at activation time.
+        Overridden by the `OP_CONNECT_HOST` env var.
+      '';
+      example = "https://op-connect.internal:8080";
+    };
+
+    connectTokenFile = lib.mkOption {
+      type    = lib.types.nullOr lib.types.str;
+      default = null;
+      description = ''
+        Path to a file containing the 1Password Connect API token. Must be set
+        together with `connectHost`. Mutually exclusive with `serviceAccountTokenFile`.
+        Sets `OP_CONNECT_TOKEN` at activation time. Overridden by `OP_CONNECT_TOKEN`
+        env var.
+      '';
+      example = "/run/secrets/op-connect-token";
+    };
+
+    secrets = lib.mkOption {
+      type    = lib.types.attrsOf secretSpec;
+      default = {};
+      description = ''
+        Named secret declarations. Each entry specifies a 1Password source and a
+        destination path on disk.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable {
+    assertions = validate {
+      inherit lib;
+      secrets    = cfg.secrets;
+      moduleName = "op-secrets (hm)";
+    } ++ [
+      {
+        assertion = !(cfg.serviceAccountTokenFile != null && (cfg.connectHost != null || cfg.connectTokenFile != null));
+        message   = "op-secrets (hm): 'serviceAccountTokenFile' and connect options ('connectHost'/'connectTokenFile') are mutually exclusive";
+      }
+      {
+        assertion = (cfg.connectHost == null) == (cfg.connectTokenFile == null);
+        message   = "op-secrets (hm): 'connectHost' and 'connectTokenFile' must both be set or both be null";
+      }
+    ];
+
+    home.activation.op-secrets = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      # String-interpolating the derivation yields its executable store path
+      ${mkActivation { inherit pkgs lib cfg; }}
+    '';
+  };
+}
+</file>
+
+<file path="scripts/vm/run-tests.sh">
+#!/usr/bin/env bash
+# scripts/vm/run-tests.sh
+# Runs one full test cycle: clone base VM → provision → assert → teardown.
+# Called by scripts/test-vm.sh after prereq checks and OP_SERVICE_ACCOUNT_TOKEN is set.
+set -euo pipefail
+
+# ── Single-run lock ────────────────────────────────────────────────────────
+# Two concurrent runs would race on the shared 1Password test items and the
+# Parallels base snapshot.  Refuse to start if another run is in progress.
+LOCK_DIR="/tmp/nix-op-secrets-vm-test.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "ERROR: another VM test run appears to be in progress" >&2
+  echo "       (lock dir: $LOCK_DIR — remove manually if stale)" >&2
+  exit 1
+fi
+
+# ── Cleanup trap — registered FIRST, before any side effects ──────────────
+# Variables used in cleanup are initialised empty here so cleanup() is safe
+# to call at any point, even if the script exits before they are assigned.
+TEST_VM="" FIELD_ID="" SSH_ID="" DOC_ID=""
+VAULT="nix-op-secrets-test"
+KNOWN_HOSTS_FILE=""  # set once we know $TEST_VM's path; cleaned up on exit
+
+cleanup() {
+  echo "==> Cleanup..."
+  [[ -n "$TEST_VM"   ]] && prlctl stop   "$TEST_VM" --kill 2>/dev/null || true
+  [[ -n "$TEST_VM"   ]] && prlctl delete "$TEST_VM"        2>/dev/null || true
+  for ID in ${FIELD_ID:-} ${SSH_ID:-} ${DOC_ID:-}; do
+    [[ -n "$ID" ]] && op item delete "$ID" --vault "$VAULT" 2>/dev/null || true
+  done
+  [[ -n "$KNOWN_HOSTS_FILE" && -f "$KNOWN_HOSTS_FILE" ]] && rm -f "$KNOWN_HOSTS_FILE"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+  echo "    Cleanup done"
+}
+trap cleanup EXIT
+
+# ── Variables (after trap registration) ───────────────────────────────────
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+# Resolve KEY_DIR the same way setup-base.sh does — prefer the XDG cache
+# location so the keypair persists across git worktree rotations.
+LEGACY_KEY_DIR="$REPO_ROOT/tests/vm/keys"
+DEFAULT_KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+if [[ -f "$LEGACY_KEY_DIR/vm_key" ]]; then
+  KEY_DIR="$LEGACY_KEY_DIR"
+else
+  KEY_DIR="$DEFAULT_KEY_DIR"
+fi
+if [[ ! -f "$KEY_DIR/vm_key" ]]; then
+  echo "ERROR: VM SSH key not found at $KEY_DIR/vm_key" >&2
+  echo "       Run scripts/vm/setup-base.sh first (or scripts/test-vm.sh)." >&2
+  exit 1
+fi
+
+BASE_VM="nix-op-secrets-base"
+TEST_VM="nix-op-secrets-test-$(date +%s)"
+KNOWN_HOSTS_DIR="$REPO_ROOT/.cache/known_hosts"
+KNOWN_HOSTS_FILE="$KNOWN_HOSTS_DIR/$TEST_VM"
+mkdir -p "$KNOWN_HOSTS_DIR"
+
+# Two option sets — *_INSECURE only for the reachability poll (runs `true`,
+# no payload); everything that carries data uses $SSH_OPTS, which pins the
+# host keys captured below.  See setup-base.sh for the threat model.
+SSH_OPTS_INSECURE="-i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
+SSH_OPTS="-i $KEY_DIR/vm_key -o UserKnownHostsFile=$KNOWN_HOSTS_FILE -o StrictHostKeyChecking=yes -o BatchMode=yes -o PasswordAuthentication=no"
+
+# ── 1. Clone base VM ──────────────────────────────────────────────────────
+# Use a linked clone from the 'clean' snapshot — much faster than a deep copy.
+# Parallels needs the snapshot UUID, which we extract from the JSON listing.
+echo "==> Cloning '$BASE_VM' → '$TEST_VM' (linked from snapshot 'clean')..."
+SNAPSHOT_ID=$(prlctl snapshot-list "$BASE_VM" -j 2>/dev/null \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(next(k for k,v in d.items() if v.get('name')=='clean'))")
+if [[ -z "$SNAPSHOT_ID" ]]; then
+  echo "ERROR: No 'clean' snapshot found on $BASE_VM" >&2
+  exit 1
+fi
+prlctl clone "$BASE_VM" --name "$TEST_VM" --linked -i "$SNAPSHOT_ID"
+prlctl start "$TEST_VM"
+
+# ── 2. Get IP ─────────────────────────────────────────────────────────────
+echo -n "==> Waiting for VM IP (up to 300s)..."
+DEADLINE=$(( $(date +%s) + 300 ))
+VM_IP=""
+while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
+  [[ "$(date +%s)" -ge "$DEADLINE" ]] && { echo; echo "ERROR: Timed out waiting for VM IP" >&2; exit 1; }
+  sleep 3
+  # Disable pipefail temporarily — grep returns 1 with no match.
+  set +o pipefail
+  VM_IP=$(prlctl list "$TEST_VM" -o ip --no-header 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  set -o pipefail
+done
+echo " $VM_IP"
+
+echo -n "==> Waiting for SSH..."
+until ssh $SSH_OPTS_INSECURE nixtest@"$VM_IP" true 2>/dev/null; do
+  printf '.'; sleep 3
+done
+echo " ready"
+
+# Capture and pin the clone's host keys. Linked-clone VMs inherit the base
+# VM's SSH host keys, but they get a fresh IP, so we re-keyscan per clone.
+echo "==> Capturing VM host keys → $KNOWN_HOSTS_FILE"
+ssh-keyscan -H -T 30 "$VM_IP" > "$KNOWN_HOSTS_FILE" 2>/dev/null
+if [[ ! -s "$KNOWN_HOSTS_FILE" ]]; then
+  echo "ERROR: ssh-keyscan returned no keys for $VM_IP" >&2
+  exit 1
+fi
+
+SSH="ssh $SSH_OPTS nixtest@$VM_IP"
+
+# ── 3. Sync repo into VM ──────────────────────────────────────────────────
+echo "==> Syncing repo into VM..."
+rsync -az --delete \
+  -e "ssh $SSH_OPTS" \
+  --exclude='.git' \
+  --exclude='.worktrees' \
+  --exclude='.cache' \
+  --exclude='tests/vm/keys' \
+  --exclude='.env' \
+  --exclude='.env.*' \
+  --exclude='*.pem' \
+  --exclude='*.key' \
+  "$REPO_ROOT/" \
+  "nixtest@$VM_IP:/home/nixtest/nix-op-secrets/"
+echo "    Repo synced to /home/nixtest/nix-op-secrets"
+
+# ── 4. Create test 1Password items ────────────────────────────────────────
+# First, scrub any orphans from earlier interrupted runs so the new items'
+# titles resolve uniquely.  All test items are prefixed with
+# "nix-op-secrets-test-" and live in a dedicated test vault.
+echo "==> Scrubbing any orphan test items in vault '$VAULT'..."
+op item list --vault "$VAULT" --format json 2>/dev/null \
+  | jq -r '.[] | select(.title|startswith("nix-op-secrets-test-")) | .id' \
+  | while read -r ORPHAN_ID; do
+      [[ -z "$ORPHAN_ID" ]] && continue
+      echo "    deleting orphan $ORPHAN_ID"
+      op item delete "$ORPHAN_ID" --vault "$VAULT" 2>/dev/null || true
+    done
+
+echo "==> Creating test 1Password items in vault '$VAULT'..."
+FIELD_ID=$(op item create \
+  --vault "$VAULT" \
+  --category Login \
+  --title "nix-op-secrets-test-field" \
+  "password=test-field-value" \
+  --format json | jq -r '.id')
+echo "    Field item: $FIELD_ID"
+
+SSH_ID=$(op item create \
+  --vault "$VAULT" \
+  --category "SSH Key" \
+  --title "nix-op-secrets-test-ssh" \
+  --format json | jq -r '.id')
+echo "    SSH Key item: $SSH_ID"
+
+DOC_ID=$(op document create "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" \
+  --vault "$VAULT" \
+  --title "nix-op-secrets-test-doc" \
+  --format json | jq -r '.id')
+echo "    Document item: $DOC_ID"
+# Template uses fixtures/infra.env.tpl which references the field item — no extra item needed
+
+# ── 5. Inject service account token into VM ───────────────────────────────
+# Send the token through SSH stdin rather than interpolating into the remote
+# command — that prevents the token from appearing in `ps` output on the host
+# and is robust against any shell-special characters in the token value.
+echo "==> Injecting service account token into VM..."
+printf '%s' "$OP_SERVICE_ACCOUNT_TOKEN" | $SSH "sudo tee /etc/op-secrets-test-token >/dev/null \
+  && sudo chown nixtest:nixtest /etc/op-secrets-test-token \
+  && sudo chmod 600 /etc/op-secrets-test-token"
+
+# ── 6. Run home-manager switch ────────────────────────────────────────────
+# Uses standalone home-manager (no NixOS required).
+# --override-input redirects op-secrets to the local checkout so we test
+# the current code without modifying flake.lock.
+echo "==> Running home-manager switch (this takes several minutes on first run)..."
+$SSH "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+  nix run github:nix-community/home-manager/release-25.05 -- switch \
+    --flake /home/nixtest/nix-op-secrets/tests/vm#nixtest \
+    --override-input op-secrets path:/home/nixtest/nix-op-secrets \
+    --no-write-lock-file 2>&1"
+echo "    Switch complete"
+
+# ── 7. Assertions ─────────────────────────────────────────────────────────
+# These checks verify both presence and identity:
+#  - exact content (field, template substitution, document sha256)
+#  - file mode bits
+#  - sshKey: derived public key matches the written .pub (keypair coherence)
+#  - manifest contains all expected entries
+echo "==> Running assertions..."
+
+fail()              { echo "FAIL: $1" >&2; exit 1; }
+check_file()        { $SSH "test -f '$1'" || fail "missing file: $1"; }
+check_mode()        { MODE=$($SSH "stat -c '%a' '$1'"); [[ "$MODE" == "$2" ]] || fail "mode $MODE != $2 on $1"; }
+# Read remote file via stdout instead of shell-quoting the expected value.
+check_exact_value() {
+  local path="$1" expected="$2"
+  local actual; actual=$($SSH "cat '$path'")
+  [[ "$actual" == "$expected" ]] || fail "$path: expected '$expected', got '$actual'"
+}
+check_contains() {
+  local path="$1" needle="$2"
+  # Pipe the needle so it isn't expanded by either shell.
+  printf '%s' "$needle" | $SSH "grep -qFf - '$path'" || fail "expected '$needle' in $path"
+}
+
+# 1. Field — content must equal the value created in step 4.
+check_file        "/home/nixtest/.local/secrets/field.txt"
+check_mode        "/home/nixtest/.local/secrets/field.txt" "600"
+check_exact_value "/home/nixtest/.local/secrets/field.txt" "test-field-value"
+
+# 2. SSH key pair — must exist with right modes AND look like real key material.
+#    We do a structural check (private has the OpenSSH/PEM "BEGIN … PRIVATE KEY"
+#    header; public starts with "ssh-…") rather than `ssh-keygen -y` cryptographic
+#    derivation, because 1Password's exact private-key output format varies
+#    (trailing newline / line endings) and isn't always parseable by ssh-keygen.
+check_file "/home/nixtest/.ssh/test-vm-key"
+check_mode "/home/nixtest/.ssh/test-vm-key" "600"
+check_file "/home/nixtest/.ssh/test-vm-key.pub"
+check_mode "/home/nixtest/.ssh/test-vm-key.pub" "644"
+$SSH "grep -q -- '-----BEGIN.*PRIVATE KEY-----' /home/nixtest/.ssh/test-vm-key" \
+  || fail "sshKey: private key missing PEM/OpenSSH 'BEGIN PRIVATE KEY' header"
+$SSH "grep -qE '^(ssh-(rsa|ed25519|dss)|ecdsa-) ' /home/nixtest/.ssh/test-vm-key.pub" \
+  || fail "sshKey: public key does not start with a recognised SSH key type"
+
+# 3. Document — sha256 must match the host-side fixture exactly.
+check_file "/home/nixtest/.local/secrets/doc.txt"
+check_mode "/home/nixtest/.local/secrets/doc.txt" "600"
+EXPECTED_DOC_SHA=$(shasum -a 256 "$REPO_ROOT/tests/vm/fixtures/test-doc.txt" | awk '{print $1}')
+ACTUAL_DOC_SHA=$($SSH "sha256sum /home/nixtest/.local/secrets/doc.txt | awk '{print \$1}'")
+[[ "$EXPECTED_DOC_SHA" == "$ACTUAL_DOC_SHA" ]] \
+  || fail "document sha256 mismatch (expected $EXPECTED_DOC_SHA, got $ACTUAL_DOC_SHA)"
+
+# 4. Template output — must contain the resolved field value.
+check_file     "/home/nixtest/.local/secrets/infra.env"
+check_mode     "/home/nixtest/.local/secrets/infra.env" "600"
+check_contains "/home/nixtest/.local/secrets/infra.env" "test-field-value"
+
+# 5. Manifest — all five entries (including __pub synthetic key for sshKey).
+for KEY in test-field test-ssh "test-ssh__pub" test-doc test-template; do
+  $SSH "jq -e '.\"$KEY\"' /home/nixtest/.local/state/op-secrets/manifest.json" > /dev/null \
+    || fail "manifest missing key: $KEY"
+done
+
+echo ""
+echo "✓ All VM integration tests passed"
+</file>
+
+<file path="scripts/vm/setup-base.sh">
+#!/usr/bin/env bash
+# scripts/vm/setup-base.sh
+# Idempotent: creates the nix-op-secrets-base Parallels VM and snapshots it.
+# Safe to run multiple times — skips steps already completed.
+#
+# What this does:
+#   1. Downloads Ubuntu Server 24.04 LTS arm64 ISO (cached in .cache/)
+#   2. Creates a cloud-init autoinstall seed ISO with our SSH key baked in
+#   3. Boots a Parallels VM and lets Ubuntu install itself unattended (~10 min)
+#   4. Installs Nix via the Determinate Systems installer (~3 min)
+#   5. Snapshots the ready state
+#
+# No Linux builder required — we download a pre-built ISO.
+set -euo pipefail
+
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+CACHE_DIR="$REPO_ROOT/.cache"
+BASE_VM="nix-op-secrets-base"
+SNAP_NAME="clean"
+
+# ── Key location resolution ───────────────────────────────────────────────
+# The test VM's SSH keypair must persist across git worktrees — the Parallels
+# base VM's authorized_keys snapshot pins one specific public key, so wiping
+# the keypair (e.g. by `git worktree remove`) silently breaks every future
+# test until the base VM is rebuilt.  Default to an XDG cache path outside
+# any worktree.  Honour an existing repo-local `tests/vm/keys/` so already
+# set-up developers don't have to migrate manually.
+LEGACY_KEY_DIR="$REPO_ROOT/tests/vm/keys"
+DEFAULT_KEY_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/nix-op-secrets/vm-keys"
+if [[ -f "$LEGACY_KEY_DIR/vm_key" ]]; then
+  KEY_DIR="$LEGACY_KEY_DIR"
+else
+  KEY_DIR="$DEFAULT_KEY_DIR"
+fi
+
+UBUNTU_ISO_URL="https://releases.ubuntu.com/24.04.2/ubuntu-24.04.2-live-server-arm64.iso"
+UBUNTU_ISO_CACHE="$CACHE_DIR/ubuntu-24.04.2-server-arm64.iso"
+# Patched ISO has 'autoinstall' added to the GRUB kernel cmdline so Ubuntu
+# proceeds without the interactive "Continue with autoinstall? (yes/no)" prompt
+# that Ubuntu 24.04 shows when the kernel parameter is absent.
+UBUNTU_ISO_PATCHED="$CACHE_DIR/ubuntu-24.04.2-server-arm64-autoinstall.iso"
+
+# ── SSH Key ────────────────────────────────────────────────────────────────
+echo "==> Checking SSH key at $KEY_DIR..."
+mkdir -p "$KEY_DIR"
+KEY_FRESHLY_GENERATED=0
+if [[ ! -f "$KEY_DIR/vm_key" ]]; then
+  ssh-keygen -t ed25519 -C "nix-op-secrets-vm-test" -N "" -f "$KEY_DIR/vm_key"
+  echo "    Generated SSH key at $KEY_DIR/vm_key"
+  KEY_FRESHLY_GENERATED=1
+else
+  echo "    SSH key already exists — skipping"
+fi
+PUB_KEY="$(cat "$KEY_DIR/vm_key.pub")"
+
+# ── Skip if base VM already has a clean snapshot ───────────────────────────
+# `prlctl snapshot-list` only shows UUIDs by default; use JSON to read names.
+# Edge case: if we just generated a fresh key, the existing snapshot's
+# authorized_keys is for a different pubkey — silently skipping would leave
+# the user with a base VM nobody can SSH into.  Detect and rebuild.
+if prlctl snapshot-list "$BASE_VM" -j 2>/dev/null | grep -q "\"name\": \"$SNAP_NAME\""; then
+  if [[ "$KEY_FRESHLY_GENERATED" == "1" ]]; then
+    echo "==> Base VM snapshot exists but SSH key was just regenerated."
+    echo "    The snapshot's authorized_keys won't match — rebuilding base VM."
+    prlctl stop "$BASE_VM" --kill 2>/dev/null || true
+    prlctl delete "$BASE_VM" 2>/dev/null || true
+  else
+    echo "==> Base VM '$BASE_VM' already has snapshot '$SNAP_NAME' — nothing to do."
+    exit 0
+  fi
+fi
+
+# ── Download Ubuntu ISO ────────────────────────────────────────────────────
+# 1.5 GB download — interruption-prone on flaky links.  We use a `.partial`
+# file so a partial download isn't confused with a complete one; `curl -C -`
+# resumes from the byte offset, and we retry up to 5 times with backoff.
+mkdir -p "$CACHE_DIR"
+if [[ ! -f "$UBUNTU_ISO_CACHE" ]]; then
+  echo "==> Downloading Ubuntu Server 24.04 LTS arm64 ISO (~1.5 GB)..."
+  curl -L --fail --progress-bar \
+       --retry 5 --retry-delay 5 --retry-all-errors \
+       -C - \
+       -o "$UBUNTU_ISO_CACHE.partial" "$UBUNTU_ISO_URL"
+  mv "$UBUNTU_ISO_CACHE.partial" "$UBUNTU_ISO_CACHE"
+  echo "    Downloaded to $UBUNTU_ISO_CACHE"
+else
+  echo "==> Ubuntu ISO already cached at $UBUNTU_ISO_CACHE"
+fi
+
+# ── Patch Ubuntu ISO with autoinstall kernel parameter ────────────────────
+# Ubuntu 24.04 subiquity requires 'autoinstall' on the kernel command line
+# to proceed without an interactive confirmation prompt.  We patch the GRUB
+# config in the ISO to add the parameter and rebuild the ISO using xorriso
+# (obtained via nix-shell — no permanent install required).
+if [[ ! -f "$UBUNTU_ISO_PATCHED" ]]; then
+  echo "==> Patching Ubuntu ISO to add 'autoinstall' kernel parameter..."
+  TMPDIR_GRUB=$(mktemp -d)
+  bsdtar -xf "$UBUNTU_ISO_CACHE" -C "$TMPDIR_GRUB" boot/grub/grub.cfg
+  # Insert 'autoinstall' before the '---' separator on linux kernel lines
+  sed 's|\(^\tlinux.*\)  ---|\1 autoinstall ---|g' \
+    "$TMPDIR_GRUB/boot/grub/grub.cfg" > "$TMPDIR_GRUB/grub-patched.cfg"
+  nix-shell -p xorriso --run "
+    xorriso -indev '$UBUNTU_ISO_CACHE' \
+      -outdev '$UBUNTU_ISO_PATCHED' \
+      -boot_image any replay \
+      -map '$TMPDIR_GRUB/grub-patched.cfg' /boot/grub/grub.cfg \
+      -commit 2>&1 | grep -E '(completed|ERROR|FAILURE)'
+  "
+  rm -rf "$TMPDIR_GRUB"
+  echo "    Patched ISO created at $UBUNTU_ISO_PATCHED"
+else
+  echo "==> Patched Ubuntu ISO already cached at $UBUNTU_ISO_PATCHED"
+fi
+
+# ── Create autoinstall seed ISO ────────────────────────────────────────────
+# Ubuntu's cloud-init NoCloud datasource reads from a disk labelled "cidata".
+# The user-data file drives an unattended install (Ubuntu 24.04 subiquity).
+echo "==> Creating autoinstall seed ISO..."
+SEED_DIR=$(mktemp -d)
+SEED_ISO="$CACHE_DIR/autoinstall-seed.iso"
+HASHED_PASS=$(openssl passwd -6 'nix-test-vm')
+
+# Write user-data with placeholders, then substitute (avoids $ escaping issues).
+# SSH key injection uses subiquity's ssh.authorized-keys field — the official
+# Ubuntu 24.04 autoinstall mechanism. This works once 'autoinstall' is in the
+# kernel cmdline (we patch the ISO to add it). Earlier late-command attempts
+# with curtin in-target failed during install.
+cat > "$SEED_DIR/user-data" << 'YAML'
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: nix-op-secrets-test
+    username: nixtest
+    password: "HASHED_PASS_PLACEHOLDER"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - "PUB_KEY_PLACEHOLDER"
+  storage:
+    layout:
+      name: direct
+  packages:
+    - curl
+    - jq
+    - git
+  late-commands:
+    # SSH keys are handled by ssh.authorized-keys above (subiquity's official
+    # mechanism). Here we just add passwordless sudo for the test user.
+    - echo 'nixtest ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/nixtest
+    - chmod 440 /target/etc/sudoers.d/nixtest
+YAML
+
+# Substitute placeholders (using | delimiter to avoid / conflicts in hash/key)
+sed -i '' "s|HASHED_PASS_PLACEHOLDER|${HASHED_PASS}|g" "$SEED_DIR/user-data"
+sed -i '' "s|PUB_KEY_PLACEHOLDER|${PUB_KEY}|g" "$SEED_DIR/user-data"
+
+# meta-data is required by cloud-init but can be empty
+touch "$SEED_DIR/meta-data"
+
+# Create ISO with volume label "cidata" (required for Ubuntu NoCloud detection).
+# hdiutil makehybrid refuses to overwrite an existing file — remove it first.
+rm -f "$SEED_ISO"
+hdiutil makehybrid -o "$SEED_ISO" -joliet -iso \
+  -default-volume-name cidata "$SEED_DIR" 2>/dev/null
+rm -rf "$SEED_DIR"
+echo "    Seed ISO created at $SEED_ISO"
+
+# ── Create VM ─────────────────────────────────────────────────────────────
+# If the VM exists but has no clean snapshot it's a partial/failed previous
+# run — stop and delete it so we start fresh.
+echo "==> Checking if base VM exists..."
+if prlctl list --all | grep -q "$BASE_VM"; then
+  echo "    VM exists but has no clean snapshot — removing for fresh start..."
+  prlctl stop "$BASE_VM" --kill 2>/dev/null || true
+  prlctl delete "$BASE_VM"
+fi
+echo "    Creating Parallels VM '$BASE_VM'..."
+prlctl create "$BASE_VM" --ostype linux --distribution ubuntu --no-hdd
+prlctl set "$BASE_VM" --cpus 2 --memsize 4096 --device-add hdd --size 30720
+echo "    VM created"
+
+# ── Attach ISOs and boot ───────────────────────────────────────────────────
+echo "==> Attaching Ubuntu ISO and seed ISO, starting VM..."
+prlctl set "$BASE_VM" --device-set cdrom0 --image "$UBUNTU_ISO_PATCHED" --connect
+# Add a second CD-ROM for the autoinstall seed
+if ! prlctl list --all -i "$BASE_VM" | grep -q "cdrom1"; then
+  prlctl set "$BASE_VM" --device-add cdrom --image "$SEED_ISO" --connect
+else
+  prlctl set "$BASE_VM" --device-set cdrom1 --image "$SEED_ISO" --connect
+fi
+prlctl start "$BASE_VM"
+
+# ── Wait for DHCP IP ───────────────────────────────────────────────────────
+echo "==> Waiting for VM to get a DHCP IP (up to 1800s)..."
+# Parallels takes a while to surface the guest IP via prlctl on the first boot.
+# Bumped from 600s → 1200s → 1800s based on observed behaviour (~10-15 min).
+DEADLINE=$(( $(date +%s) + 1800 ))
+VM_IP=""
+while [[ -z "$VM_IP" || "$VM_IP" == "-" ]]; do
+  if [[ "$(date +%s)" -ge "$DEADLINE" ]]; then
+    echo "ERROR: Timed out waiting for VM IP" >&2; exit 1
+  fi
+  sleep 3
+  # Disable pipefail temporarily — grep returns 1 when no IP yet, which would
+  # otherwise abort the script under `set -o pipefail`.
+  set +o pipefail
+  VM_IP=$(prlctl list "$BASE_VM" -o ip --no-header 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+  set -o pipefail
+done
+echo "    VM IP: $VM_IP"
+
+# ── SSH options ────────────────────────────────────────────────────────────
+# We use two SSH option sets:
+#   *_INSECURE — only for the initial "is sshd alive" reachability poll. The
+#                command we run is `true` (no payload), so an MITM gains
+#                nothing.  This call exists solely to detect that the VM has
+#                finished booting.
+#   $SSH_BASE  — pinned to the captured host key.  Used for every call that
+#                carries data: the Determinate Nix installer pipe and the
+#                Nix verification.  Refuses to connect if the host key
+#                changes (which would indicate a MITM or a re-imaged VM).
+KNOWN_HOSTS_DIR="$REPO_ROOT/.cache/known_hosts"
+KNOWN_HOSTS_FILE="$KNOWN_HOSTS_DIR/$BASE_VM"
+mkdir -p "$KNOWN_HOSTS_DIR"
+
+SSH_BASE_INSECURE="ssh -i $KEY_DIR/vm_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o PasswordAuthentication=no"
+
+# ── Wait for Ubuntu autoinstall to complete and SSH to come up ────────────
+# Ubuntu autoinstall takes ~10 minutes. We poll until SSH is available
+# on the installed system (it reboots after install completes).
+echo -n "==> Waiting for Ubuntu autoinstall + reboot + SSH (up to 20 min)..."
+DEADLINE=$(( $(date +%s) + 1200 ))
+until $SSH_BASE_INSECURE nixtest@"$VM_IP" true 2>/dev/null; do
+  if [[ "$(date +%s)" -ge "$DEADLINE" ]]; then
+    echo
+    echo "ERROR: Timed out waiting for SSH after Ubuntu autoinstall" >&2
+    exit 1
+  fi
+  printf '.'; sleep 10
+done
+echo " ready"
+
+# ── Capture and pin the VM's host keys ─────────────────────────────────────
+# Once sshd is responding, capture all offered host keys with ssh-keyscan
+# and store them in a per-VM known_hosts file under .cache/ (gitignored).
+# Every subsequent SSH call uses StrictHostKeyChecking=yes against that
+# file, eliminating the MITM window on the security-sensitive
+# Nix-installer pipe below.  Residual risk: the keyscan itself is TOFU on a
+# local NAT'd Parallels network — adequate for dev use; for stronger
+# guarantees pre-seed host keys via cloud-init.
+echo "==> Capturing VM host keys → $KNOWN_HOSTS_FILE"
+rm -f "$KNOWN_HOSTS_FILE"
+ssh-keyscan -H -T 30 "$VM_IP" > "$KNOWN_HOSTS_FILE" 2>/dev/null
+if [[ ! -s "$KNOWN_HOSTS_FILE" ]]; then
+  echo "ERROR: ssh-keyscan returned no keys for $VM_IP" >&2
+  exit 1
+fi
+
+SSH_BASE="ssh -i $KEY_DIR/vm_key -o UserKnownHostsFile=$KNOWN_HOSTS_FILE -o StrictHostKeyChecking=yes -o BatchMode=yes -o PasswordAuthentication=no"
+
+# ── Install Nix (Determinate Systems) ─────────────────────────────────────
+echo "==> Installing Nix via Determinate Systems installer (~3 min)..."
+$SSH_BASE nixtest@"$VM_IP" \
+  "curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix \
+   | sudo sh -s -- install linux --no-confirm"
+echo "    Nix installed"
+
+# ── Verify Nix works ───────────────────────────────────────────────────────
+echo "==> Verifying Nix..."
+$SSH_BASE nixtest@"$VM_IP" \
+  "source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && nix --version"
+
+# ── Detach seed ISO and snapshot ──────────────────────────────────────────
+echo "==> Detaching seed ISO and snapshotting clean state..."
+prlctl stop "$BASE_VM"
+prlctl set "$BASE_VM" --device-del cdrom1 2>/dev/null || true
+prlctl snapshot "$BASE_VM" --name "$SNAP_NAME"
+echo "==> Base VM ready. Snapshot '$SNAP_NAME' created."
+</file>
+
+<file path="scripts/test-vm.sh">
+#!/usr/bin/env bash
+# scripts/test-vm.sh
+# Entry point for VM-based integration tests.
+# Usage: ./scripts/test-vm.sh
+#
+# Prerequisites:
+#   - Apple Silicon Mac with Parallels Desktop ≥26 (prlctl on PATH)
+#   - 1Password CLI (op) on PATH
+#   - .env at repo root containing OP_SERVICE_ACCOUNT_TOKEN
+#   - The "nix-op-secrets-test" vault must exist in your 1Password account
+#     with your service account granted access to it
+set -euo pipefail
+
+REPO_ROOT="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+# When running from a worktree, also check the main repo root for .env
+MAIN_ROOT="$(dirname "$(git -C "$(dirname "$0")" rev-parse --git-common-dir)")"
+ENV_FILE="$REPO_ROOT/.env"
+if [[ ! -f "$ENV_FILE" && -f "$MAIN_ROOT/.env" ]]; then
+  ENV_FILE="$MAIN_ROOT/.env"
+fi
+
+# ── Prereq: prlctl ────────────────────────────────────────────────────────
+if ! command -v prlctl &>/dev/null; then
+  echo "ERROR: prlctl not found." >&2
+  echo "  Install Parallels Desktop ≥26 and ensure prlctl is on your PATH." >&2
+  echo "  Typically: /usr/local/bin/prlctl" >&2
+  exit 1
+fi
+if ! prlctl list &>/dev/null; then
+  echo "ERROR: prlctl is available but 'prlctl list' failed." >&2
+  echo "  This usually means Parallels Desktop is not licensed or not running." >&2
+  exit 1
+fi
+
+# ── Prereq: op CLI ────────────────────────────────────────────────────────
+if ! command -v op &>/dev/null; then
+  echo "ERROR: 1Password CLI (op) not found." >&2
+  echo "  Install it: brew install 1password-cli" >&2
+  echo "  Or: https://developer.1password.com/docs/cli/get-started/" >&2
+  exit 1
+fi
+
+# ── Prereq: .env ──────────────────────────────────────────────────────────
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: .env not found at $ENV_FILE" >&2
+  echo "  Copy .env.sample to .env and fill in your service account token:" >&2
+  echo "    cp .env.sample .env && \$EDITOR .env" >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+
+# ── Prereq: OP_SERVICE_ACCOUNT_TOKEN ─────────────────────────────────────
+if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
+  echo "ERROR: OP_SERVICE_ACCOUNT_TOKEN is not set in .env" >&2
+  echo "  Generate a service account token at:" >&2
+  echo "    https://developer.1password.com/docs/service-accounts/" >&2
+  exit 1
+fi
+export OP_SERVICE_ACCOUNT_TOKEN
+
+# ── Prereq: op auth ───────────────────────────────────────────────────────
+if ! op vault list &>/dev/null; then
+  echo "ERROR: 'op vault list' failed — service account token may be invalid or expired." >&2
+  echo "  Check your token at: https://1password.com/sign-in" >&2
+  exit 1
+fi
+
+# ── Prereq: test vault ────────────────────────────────────────────────────
+if ! op vault get nix-op-secrets-test &>/dev/null; then
+  echo ""
+  echo "The vault 'nix-op-secrets-test' is not accessible via your service account token."
+  echo ""
+  echo "This can mean one of two things:"
+  echo "  A) The vault does not exist yet."
+  echo "  B) The vault exists but your service account has not been granted access to it."
+  echo ""
+  echo "If (A) — create the vault with a human user account, then grant your service"
+  echo "         account access before re-running this script:"
+  echo ""
+  echo "           op vault create nix-op-secrets-test   # as a human user"
+  echo ""
+  echo "If (B) — skip vault creation and go straight to granting access."
+  echo ""
+  echo "Either way, grant the service account vault access via the 1Password web UI:"
+  echo "  1. Sign in at https://start.1password.com"
+  echo "  2. Go to Developer Tools → Service Accounts → <your service account>"
+  echo "  3. Under 'Vault Access', click 'Add vault' → 'nix-op-secrets-test'"
+  echo "     (Read & Write permissions required)"
+  echo ""
+  printf "Create the vault now with op CLI (choose only if it doesn't exist yet)? [y/N] "
+  read -r REPLY
+  if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+    op vault create nix-op-secrets-test
+    echo ""
+    echo "Vault created. IMPORTANT: You must still grant your service account access to"
+    echo "this vault via the 1Password web UI before re-running this script:"
+    echo "  https://start.1password.com → Developer Tools → Service Accounts"
+    exit 1
+  else
+    echo ""
+    echo "Re-run this script after granting your service account access to the vault." >&2
+    exit 1
+  fi
+fi
+
+# ── Run ───────────────────────────────────────────────────────────────────
+echo "==> All prerequisites satisfied"
+echo ""
+echo "==> Step 1: Ensure base VM exists (idempotent)"
+bash "$REPO_ROOT/scripts/vm/setup-base.sh"
+
+echo ""
+echo "==> Step 2: Run integration tests"
+bash "$REPO_ROOT/scripts/vm/run-tests.sh"
+</file>
+
+<file path="tests/vm/fixtures/infra.env.tpl">
+# op inject template — references the test field secret
+FIELD_VAL={{ op://nix-op-secrets-test/nix-op-secrets-test-field/password }}
+</file>
+
+<file path="tests/vm/fixtures/test-doc.txt">
+nix-op-secrets test document fixture
+This file is uploaded to 1Password as a Document item during VM integration tests.
+</file>
+
+<file path="tests/vm/configuration-macos.nix">
+# tests/vm/configuration-macos.nix
+# Placeholder macOS configuration for the manual testing guide.
+# See docs/vm-testing-macos.md for the full setup walkthrough.
+#
+# NOTE: A real macOS test configuration (nix-darwin + HM) would add an
+# op-secrets block here with dest paths using macOS home conventions:
+#   home-manager.users.nixtest.op-secrets = { ... dest = "/Users/nixtest/..."; };
+{ pkgs, ... }:
+{
+  # Networking
+  networking.hostName = "nix-op-secrets-macos-test";
+
+  # Nix settings
+  nix.settings.experimental-features = [ "nix-command" "flakes" ];
+
+  # Packages
+  environment.systemPackages = [ pkgs.git pkgs.jq ];
+
+  system.stateVersion = 5;
+}
+</file>
+
+<file path="tests/vm/flake.lock">
+{
+  "nodes": {
+    "darwin": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1769584835,
+        "narHash": "sha256-I21RElVDKF8YhA24LMDzXqb4AmkreYfcIYo7SGU9Jek=",
+        "owner": "nix-darwin",
+        "repo": "nix-darwin",
+        "rev": "d6c2f8abfb695d5eae734386257da7fb0ffa8fca",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-darwin",
+        "ref": "nix-darwin-25.05",
+        "repo": "nix-darwin",
+        "type": "github"
+      }
+    },
+    "hm": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1763992789,
+        "narHash": "sha256-WHkdBlw6oyxXIra/vQPYLtqY+3G8dUVZM8bEXk0t8x4=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "44831a7eaba4360fb81f2acc5ea6de5fde90aaa3",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "ref": "release-25.05",
+        "repo": "home-manager",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1767313136,
+        "narHash": "sha256-16KkgfdYqjaeRGBaYsNrhPRRENs0qzkQVUooNHtoy2w=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "ac62194c3917d5f474c1a844b6fd6da2db95077d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-25.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "op-secrets": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1778600903,
+        "narHash": "sha256-ZeaE448W0NXzw6me7/Nijg4N9ZwxEeQ03hSJU201Q28=",
+        "owner": "nwlnexus",
+        "repo": "nix-op-secrets",
+        "rev": "bf85cf28370c4ffb6105d46a2f10696befbd9d8a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nwlnexus",
+        "repo": "nix-op-secrets",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "darwin": "darwin",
+        "hm": "hm",
+        "nixpkgs": "nixpkgs",
+        "op-secrets": "op-secrets"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
+</file>
+
+<file path="tests/vm/flake.nix">
+{
+  description = "nix-op-secrets VM integration test flake";
+
+  inputs = {
+    nixpkgs.url    = "github:nixos/nixpkgs/nixos-25.05";
+    hm.url         = "github:nix-community/home-manager/release-25.05";
+    hm.inputs.nixpkgs.follows = "nixpkgs";
+    # op-secrets pinned to GitHub; overridden at test time with:
+    #   --override-input op-secrets path:/home/nixtest/nix-op-secrets
+    #   --no-write-lock-file
+    op-secrets.url = "github:nwlnexus/nix-op-secrets";
+    op-secrets.inputs.nixpkgs.follows = "nixpkgs";
+    darwin.url     = "github:nix-darwin/nix-darwin/nix-darwin-25.05";
+    darwin.inputs.nixpkgs.follows = "nixpkgs";
+  };
+
+  outputs = { nixpkgs, hm, op-secrets, darwin, ... }: {
+    # Standalone Home Manager config — runs on Ubuntu in the test VM.
+    # The VM has Nix installed (Determinate Systems) but is not NixOS.
+    # Run with:
+    #   nix run github:nix-community/home-manager/release-25.05 -- switch \
+    #     --flake /home/nixtest/nix-op-secrets/tests/vm#nixtest \
+    #     --override-input op-secrets path:/home/nixtest/nix-op-secrets \
+    #     --no-write-lock-file
+    homeConfigurations.nixtest = hm.lib.homeManagerConfiguration {
+      # op-secrets depends on 1password-cli (unfree); use a configured pkgs.
+      pkgs = import nixpkgs {
+        system = "aarch64-linux";
+        config.allowUnfree = true;
+      };
+      modules = [
+        op-secrets.hmModules.default
+        ./home.nix
+      ];
+    };
+
+    # macOS manual test target — placeholder; see docs/vm-testing-macos.md
+    darwinConfigurations.test-macos = darwin.lib.darwinSystem {
+      system  = "aarch64-darwin";
+      modules = [
+        hm.darwinModules.home-manager
+        op-secrets.darwinModules.default
+        ./configuration-macos.nix
+      ];
+    };
+  };
+}
+</file>
+
+<file path="tests/vm/home.nix">
+# tests/vm/home.nix
+# Standalone Home Manager configuration for the Ubuntu VM integration tests.
+# Declares all four op-secrets secret types against the fixed test vault.
+{ ... }:
+{
+  home.username    = "nixtest";
+  home.homeDirectory = "/home/nixtest";
+  home.stateVersion = "25.05";
+
+  op-secrets = {
+    enable  = true;
+    serviceAccountTokenFile = "/etc/op-secrets-test-token";
+
+    secrets = {
+      # 1. Field — plain op:// reference
+      test-field = {
+        type   = "field";
+        source = "op://nix-op-secrets-test/nix-op-secrets-test-field/password";
+        dest   = "/home/nixtest/.local/secrets/field.txt";
+      };
+
+      # 2. SSH key — writes private + public key pair
+      test-ssh = {
+        type           = "sshKey";
+        source         = "op://nix-op-secrets-test/nix-op-secrets-test-ssh";
+        dest           = "/home/nixtest/.ssh/test-vm-key";
+        writePublicKey = true;
+      };
+
+      # 3. Document — binary/text blob from 1Password
+      test-doc = {
+        type  = "document";
+        vault = "nix-op-secrets-test";
+        item  = "nix-op-secrets-test-doc";
+        dest  = "/home/nixtest/.local/secrets/doc.txt";
+      };
+
+      # 4. Template — op inject using committed fixture.
+      # When `template` is set, it takes precedence over `type` and the module
+      # invokes `op inject` instead of `op read`.
+      test-template = {
+        template = ./fixtures/infra.env.tpl;
+        dest     = "/home/nixtest/.local/secrets/infra.env";
+      };
+    };
+  };
+}
+</file>
+
+<file path="tests/default.nix">
+# tests/default.nix
+# Fast hermetic integration test for the op-secrets activation script.
+# Runs in ~5 s in the Nix sandbox, no Parallels, no real 1Password vault.
+# Wired to flake `checks.<system>.integration` — runs via `nix flake check`.
+#
+# Three phases:
+#   A. Initial activation     — all four secret types are written correctly.
+#   B. Idempotent re-run      — same cfg, second activation does not corrupt
+#                                state and leaves files / manifest intact.
+#   C. Orphan removal         — re-run with `test-doc` removed; activation
+#                                must delete the orphaned file and prune the
+#                                manifest entry, while leaving other entries
+#                                untouched.
+{ pkgs, lib }:
+let
+  mkActivation = import ../lib/mk-activation.nix;
+
+  # Build a fake _1password-cli package that wraps our mock script.
+  # mock-op.sh returns deterministic, predictable output so we can assert
+  # against exact content rather than just file presence.
+  mockOpPkg = pkgs.runCommand "mock-1password-cli" {} ''
+    mkdir -p $out/bin
+    cp ${./mock-op.sh} $out/bin/op
+    chmod +x $out/bin/op
+  '';
+
+  fakePkgs = pkgs // {
+    _1password-cli = mockOpPkg;
+    # jq is real — we need it for manifest operations
+  };
+
+  # Common attributes used by every secret declaration.  Splitting these out
+  # avoids the long noisy repetition in each entry.
+  baseSecret = {
+    vault = null;
+    item = null;
+    template = null;
+    writePublicKey = false;
+    mode = "0600";
+    source = null;
+    account = null;
+    serviceAccountTokenCommand = null;
+  };
+
+  mkSecret = attrs: baseSecret // attrs;
+
+  # All dest paths use /DEST_BASE sentinel that gets replaced at test runtime.
+  secretsFull = {
+    "test-field" = mkSecret {
+      type = "field";
+      source = "op://Test/Item/password";
+      dest = "/DEST_BASE/field.txt";
+    };
+    "test-ssh" = mkSecret {
+      type = "sshKey";
+      source = "op://Test/SSH Key";
+      dest = "/DEST_BASE/id_ed25519";
+      writePublicKey = true;
+    };
+    "test-doc" = mkSecret {
+      type = "document";
+      vault = "Test";
+      item = "My Doc";
+      dest = "/DEST_BASE/doc.txt";
+    };
+    "test-template" = mkSecret {
+      # When `template` is set it takes precedence over `type`; the value of
+      # `type` is therefore irrelevant for this entry but the option requires
+      # one of the enum values.
+      type = "field";
+      template = ./infra.env.tpl;
+      dest = "/DEST_BASE/infra.env";
+    };
+  };
+
+  # cfg used for the prune phase — test-doc removed so the script must
+  # delete /DEST_BASE/doc.txt and drop its manifest entry.
+  secretsPruned = removeAttrs secretsFull [ "test-doc" ];
+
+  mkCfg = secrets: {
+    account = null;
+    serviceAccountTokenFile = null;
+    connectHost = null;
+    connectTokenFile = null;
+    inherit secrets;
+  };
+
+  scriptFull   = mkActivation { pkgs = fakePkgs; inherit lib; cfg = mkCfg secretsFull;   };
+  scriptPruned = mkActivation { pkgs = fakePkgs; inherit lib; cfg = mkCfg secretsPruned; };
+
+in {
+  integration = pkgs.runCommand "op-secrets-integration-test" {
+    buildInputs = [ pkgs.jq pkgs.gnugrep pkgs.coreutils ];
+  } ''
+    set -euo pipefail
+
+    # ── Sandbox setup ───────────────────────────────────────────────────────
+    # Set up a writable HOME and dest directory within the sandbox temp space.
+    # The activation script has /DEST_BASE/ in its generated dest paths; we
+    # patch those to the actual temp path at runtime so the test is hermetic.
+    export HOME="$(mktemp -d)"
+    export DEST_BASE="$(mktemp -d)"
+
+    patch_script() {
+      local src="$1" out="$2"
+      sed "s|/DEST_BASE|$DEST_BASE|g" "$src" > "$out"
+      chmod +x "$out"
+    }
+
+    SCRIPT_FULL="$(mktemp)"
+    SCRIPT_PRUNED="$(mktemp)"
+    patch_script "${scriptFull}"   "$SCRIPT_FULL"
+    patch_script "${scriptPruned}" "$SCRIPT_PRUNED"
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+    MANIFEST="$HOME/.local/state/op-secrets/manifest.json"
+
+    pass() { echo "PASS: $1"; }
+    fail() { echo "FAIL: $1" >&2; exit 1; }
+
+    check_file_present() {
+      [[ -f "$2" ]] || fail "$1 — file missing: $2"
+    }
+    check_file_absent() {
+      [[ ! -e "$2" ]] || fail "$1 — file should have been removed: $2"
+    }
+    check_mode() {
+      local mode
+      mode=$(stat -c '%a' "$2" 2>/dev/null) || mode=$(stat -f '%Op' "$2" 2>/dev/null)
+      [[ "$mode" == "$3" ]] || fail "$1 — mode $mode != $3 on $2"
+    }
+    check_content_exact() {
+      local actual; actual=$(cat "$2")
+      [[ "$actual" == "$3" ]] || fail "$1 — expected '$3', got '$actual'"
+    }
+    check_content_contains() {
+      grep -qF -- "$3" "$2" || fail "$1 — expected '$3' inside $2"
+    }
+    check_manifest_has() {
+      jq -e --arg k "$1" '.[$k]' "$MANIFEST" >/dev/null || fail "manifest missing key: $1"
+    }
+    check_manifest_missing() {
+      jq -e --arg k "$1" 'has($k)|not' "$MANIFEST" >/dev/null || fail "manifest still has key: $1"
+    }
+
+    # ── Phase A: first activation ───────────────────────────────────────────
+    echo ""
+    echo "=== Phase A: first activation (all 4 secrets) ==="
+    bash "$SCRIPT_FULL" 2>&1
+
+    # Files exist with right modes
+    check_file_present "field"            "$DEST_BASE/field.txt"
+    check_mode         "field"            "$DEST_BASE/field.txt"     "600"
+    check_file_present "ssh private"      "$DEST_BASE/id_ed25519"
+    check_mode         "ssh private"      "$DEST_BASE/id_ed25519"    "600"
+    check_file_present "ssh public"       "$DEST_BASE/id_ed25519.pub"
+    check_mode         "ssh public"       "$DEST_BASE/id_ed25519.pub" "644"
+    check_file_present "document"         "$DEST_BASE/doc.txt"
+    check_mode         "document"         "$DEST_BASE/doc.txt"       "600"
+    check_file_present "template output"  "$DEST_BASE/infra.env"
+    check_mode         "template output"  "$DEST_BASE/infra.env"     "600"
+
+    # Exact content — the mock returns deterministic strings keyed off the
+    # op:// URI, so we can pin the exact expected bytes.  This catches
+    # regressions that previously slipped past existence-only checks (e.g.
+    # writing the wrong secret to the wrong dest).
+    check_content_exact     "field content"  "$DEST_BASE/field.txt" \
+                            "mock-field-value-for-op://Test/Item/password"
+    check_content_exact     "doc content"    "$DEST_BASE/doc.txt"   "mock-document-content"
+    check_content_contains  "template subst" "$DEST_BASE/infra.env" "MOCK_KEY=mock-injected-value"
+    check_content_contains  "ssh priv pem"   "$DEST_BASE/id_ed25519"     "BEGIN OPENSSH PRIVATE KEY"
+    check_content_contains  "ssh pub algo"   "$DEST_BASE/id_ed25519.pub" "ssh-ed25519"
+
+    # Manifest contains all 5 entries (the synthetic __pub for the sshKey).
+    check_file_present "manifest" "$MANIFEST"
+    for key in test-field test-ssh test-ssh__pub test-doc test-template; do
+      check_manifest_has "$key"
+    done
+    pass "phase A — initial activation"
+
+    # Capture content hashes so we can detect any mutation in phase B.
+    SHA_FIELD_A=$(sha256sum "$DEST_BASE/field.txt"     | awk '{print $1}')
+    SHA_SSH_A=$(  sha256sum "$DEST_BASE/id_ed25519"    | awk '{print $1}')
+    SHA_PUB_A=$(  sha256sum "$DEST_BASE/id_ed25519.pub"| awk '{print $1}')
+    SHA_DOC_A=$(  sha256sum "$DEST_BASE/doc.txt"       | awk '{print $1}')
+    SHA_TPL_A=$(  sha256sum "$DEST_BASE/infra.env"     | awk '{print $1}')
+    MANIFEST_A=$( jq -S . "$MANIFEST" )
+
+    # ── Phase B: idempotent re-run ──────────────────────────────────────────
+    echo ""
+    echo "=== Phase B: idempotent re-run (same cfg) ==="
+    bash "$SCRIPT_FULL" 2>&1
+
+    [[ "$(sha256sum "$DEST_BASE/field.txt"      | awk '{print $1}')" == "$SHA_FIELD_A" ]] \
+      || fail "phase B — field.txt changed on re-run"
+    [[ "$(sha256sum "$DEST_BASE/id_ed25519"     | awk '{print $1}')" == "$SHA_SSH_A"   ]] \
+      || fail "phase B — id_ed25519 changed on re-run"
+    [[ "$(sha256sum "$DEST_BASE/id_ed25519.pub" | awk '{print $1}')" == "$SHA_PUB_A"   ]] \
+      || fail "phase B — id_ed25519.pub changed on re-run"
+    [[ "$(sha256sum "$DEST_BASE/doc.txt"        | awk '{print $1}')" == "$SHA_DOC_A"   ]] \
+      || fail "phase B — doc.txt changed on re-run"
+    [[ "$(sha256sum "$DEST_BASE/infra.env"      | awk '{print $1}')" == "$SHA_TPL_A"   ]] \
+      || fail "phase B — infra.env changed on re-run"
+    [[ "$(jq -S . "$MANIFEST")" == "$MANIFEST_A" ]] \
+      || fail "phase B — manifest mutated on re-run"
+    pass "phase B — idempotent re-activation"
+
+    # ── Phase C: orphan removal ─────────────────────────────────────────────
+    echo ""
+    echo "=== Phase C: orphan removal (test-doc dropped) ==="
+    bash "$SCRIPT_PRUNED" 2>&1
+
+    # doc.txt must be gone, its manifest entry pruned.
+    check_file_absent     "phase C — orphan doc file"  "$DEST_BASE/doc.txt"
+    check_manifest_missing "test-doc"
+
+    # All other declared secrets still present and unchanged.
+    check_file_present "phase C — field still present"     "$DEST_BASE/field.txt"
+    check_file_present "phase C — ssh priv still present"  "$DEST_BASE/id_ed25519"
+    check_file_present "phase C — ssh pub still present"   "$DEST_BASE/id_ed25519.pub"
+    check_file_present "phase C — template still present"  "$DEST_BASE/infra.env"
+    for key in test-field test-ssh test-ssh__pub test-template; do
+      check_manifest_has "$key"
+    done
+    pass "phase C — orphan removed, others intact"
+
+    echo ""
+    echo "All integration tests passed (3 phases, all assertions)"
+    touch $out
+  '';
+}
+</file>
+
+<file path="tests/infra.env.tpl">
+MOCK_KEY={{ op://Test/Item/key }}
+</file>
+
+<file path="tests/mock-op.sh">
+#!/usr/bin/env bash
+# Mock op CLI for testing. Records calls, returns predictable output.
+CMD="$1"
+shift
+
+case "$CMD" in
+  whoami)
+    echo "test@example.com"
+    exit 0
+    ;;
+  read)
+    # Last argument is the URI
+    URI="${!#}"
+    case "$URI" in
+      # sshKey fields — exact casing required by op CLI
+      *"/private key")
+        printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nmock-private-key\n-----END OPENSSH PRIVATE KEY-----\n'
+        ;;
+      *"/public key")
+        echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 test@mock"
+        ;;
+      *)
+        echo "mock-field-value-for-${URI}"
+        ;;
+    esac
+    exit 0
+    ;;
+  document)
+    # Parse: op document get <item> --vault <vault> --output <path>
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "--output" ]]; then
+        echo "mock-document-content" > "$2"
+        exit 0
+      fi
+      shift
+    done
+    echo "mock-op: document get missing --output" >&2
+    exit 1
+    ;;
+  inject)
+    # Parse: op inject -i <template> -o <output>
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "-o" ]]; then
+        echo "MOCK_KEY=mock-injected-value" > "$2"
+        exit 0
+      fi
+      shift
+    done
+    echo "mock-op: inject missing -o" >&2
+    exit 1
+    ;;
+  signin)
+    # Simulate successful signin
+    exit 0
+    ;;
+  *)
+    echo "mock-op: unknown command '$CMD'" >&2
+    exit 1
+    ;;
+esac
+</file>
+
+<file path=".env.sample">
+# Copy this file to .env — NEVER commit .env
+#
+# 1. Create the test vault (if it doesn't already exist):
+#      op vault create nix-op-secrets-test
+#
+# 2. Generate a 1Password service account token:
+#    https://developer.1password.com/docs/service-accounts/
+#
+#    IMPORTANT: After generating the token, you must explicitly grant the
+#    service account access to the "nix-op-secrets-test" vault. The token
+#    does NOT automatically inherit vault access — even if the token owner
+#    created the vault.
+#
+#    Grant access via the 1Password web UI:
+#      a. Sign in at https://start.1password.com
+#      b. Navigate to Developer Tools → Service Accounts
+#      c. Select your service account
+#      d. Under "Vault Access", click "Add vault" and add "nix-op-secrets-test"
+#         with at minimum Read & Write permissions
+#
+# 3. Place this file at the repo root as .env before running:
+#      ./scripts/test-vm.sh
+
+OP_SERVICE_ACCOUNT_TOKEN=ops_your_token_here
+</file>
+
+<file path=".envrc">
+#!/usr/bin/env bash
+# .envrc — direnv loads this locally; CI sources it with OP_SERVICE_ACCOUNT_TOKEN set
+# Reads secrets from 1Password and generates .env files for each workspace
+
+# Source .env files for local overrides. This setup works with both direnv (`direnv allow`)
+# and interactive sourcing (`source .envrc`), ensuring variables are exported to the parent shell
+# (as required by both methods).
+
+# Export all variables set/sourced within this block
+set -a
+
+if [ -f "${HOME}/projects/personal/.env" ]; then
+  # shellcheck source=/dev/null
+  . "${HOME}/projects/personal/.env"
+fi
+
+if [ -f ".env" ]; then
+  # shellcheck source=/dev/null
+  . ".env"
+fi
+
+set +a
+</file>
+
+<file path=".gitignore">
+result
+result-*
+.direnv/
+.worktrees/
+.env
+.cache/
+tests/vm/keys/
+</file>
+
+<file path="flake.lock">
+{
+  "nodes": {
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1777954456,
+        "narHash": "sha256-hGdgeU2Nk87RAuZyYjyDjFL6LK7dAZN5RE9+hrDTkDU=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "549bd84d6279f9852cae6225e372cc67fb91a4c1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
+</file>
+
+<file path="flake.nix">
+{
+  description = "Nix modules for writing 1Password secrets at activation time";
+
+  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
+  outputs = { self, nixpkgs, ... }:
+  let
+    lib     = nixpkgs.lib;
+    systems = [ "aarch64-darwin" "x86_64-darwin" "x86_64-linux" "aarch64-linux" ];
+    forAllSystems = lib.genAttrs systems;
+  in {
+    darwinModules.default = import ./modules/darwin.nix;
+    hmModules.default     = import ./modules/hm.nix;
+
+    checks = forAllSystems (system:
+      let pkgs = nixpkgs.legacyPackages.${system};
+      in import ./tests/default.nix { inherit pkgs lib; }
+    );
+
+    packages = forAllSystems (system:
+      let
+        evalPkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+        hmOpts = (lib.evalModules {
+          modules = [
+            (import ./modules/hm.nix)
+            { _module.args = { pkgs = evalPkgs; }; _module.check = false; }
+          ];
+        }).options;
+        optionsDoc = evalPkgs.nixosOptionsDoc { options = hmOpts.op-secrets; };
+      in {
+        docs    = optionsDoc.optionsCommonMark;
+        default = evalPkgs._1password-cli;
+      }
+    );
+
+    devShells = forAllSystems (system:
+      let pkgs = import nixpkgs { inherit system; config.allowUnfree = true; };
+      in {
+        default = pkgs.mkShell {
+          packages = [ pkgs._1password-cli ];
+        };
+      }
+    );
+  };
+}
+</file>
+
+<file path="README.md">
+# nix-op-secrets
+
+Nix flake modules for writing [1Password](https://1password.com) secrets to disk
+at activation time. Works with nix-darwin (macOS) and Home Manager (macOS + Linux).
+
+## Requirements
+
+- `nixpkgs.config.allowUnfree = true` — required for `_1password-cli`
+- [1Password CLI v2](https://developer.1password.com/docs/cli) installed (provided
+  automatically by this flake's `default` package if you add it to your packages)
+
+## Quick Install
+
+```nix
+# flake.nix
+inputs.op-secrets.url = "github:nwlnexus/nix-op-secrets";
+
+# In your Home Manager config:
+imports = [ inputs.op-secrets.hmModules.default ];
+```
+
+## Platform Support
+
+| Module | macOS | Linux |
+|--------|-------|-------|
+| `hmModules.default` | ✓ | ✓ |
+| `darwinModules.default` | ✓ | — |
+
+## Auth
+
+Activation uses `op` CLI with this precedence (module-level):
+
+1. `OP_SERVICE_ACCOUNT_TOKEN` in environment → used directly
+2. `serviceAccountTokenFile` option → token read from file
+3. `op whoami` succeeds → already authenticated (app agent or existing session)
+4. Fallback → `op signin` interactively (requires a TTY; system activation exits immediately instead)
+
+For headless Linux hosts: set `OP_SERVICE_ACCOUNT_TOKEN` or `serviceAccountTokenFile`.
+
+### Multi-account configs
+
+Each secret may carry its own `account` and/or `serviceAccountTokenCommand`
+override (see [Usage](#usage) and the [options reference](#options-reference)),
+letting a single `op-secrets` block pull from more than one 1Password account.
+
+When a secret declares its own `account` *without* a matching
+`serviceAccountTokenCommand`, the module-level service-account token is
+explicitly dropped for that secret's fetch — tokens are account-scoped and the
+module token would be invalid against a different account. The fetch falls
+back to whatever interactive `op` session exists for the per-secret account
+(typically provided by the 1Password desktop app's CLI integration).
+
+For fully autonomous runs (no desktop session, no TTY), keep every secret on
+the module-level account so the module-level token applies to all of them, or
+supply a per-secret `serviceAccountTokenCommand` for each off-account secret.
+
+## Usage
+
+```nix
+op-secrets = {
+  enable  = true;
+  account = "my.1password.com";  # optional for single-account users
+
+  secrets = {
+    # SSH Key item (enforces 0600, optionally writes .pub in authorized_keys format)
+    "github-ssh" = {
+      type           = "sshKey";
+      source         = "op://Personal/GitHub SSH Key";   # no field segment
+      dest           = "${config.home.homeDirectory}/.ssh/github_ed25519";
+      writePublicKey = true;
+    };
+
+    # Single concealed/text field
+    "stripe-key" = {
+      type   = "field";
+      source = "op://Work/Stripe/secret key";
+      dest   = "${config.home.homeDirectory}/.config/stripe/key";
+    };
+
+    # Multi-field .env via op inject template
+    "infra-env" = {
+      template = ./secrets/infra.env.tpl;  # must contain only op:// refs
+      dest     = "${config.home.homeDirectory}/projects/infra/.env";
+    };
+
+    # File stored as a 1Password Document item
+    "corp-cert" = {
+      type  = "document";
+      vault = "Work";
+      item  = "Corp Root CA";
+      dest  = "${config.home.homeDirectory}/.local/share/ca/corp.pem";
+      mode  = "0644";
+    };
+  };
+};
+```
+
+## Options Reference
+
+See the [generated options reference](https://nwlnexus.github.io/nix-op-secrets/).
+
+## Testing
+
+Two test layers — start with the fast one. The VM test is opt-in for
+real-cloud regressions only.
+
+### Fast hermetic test (`nix flake check`)
+
+Runs in ~5 s on any platform with Nix. Uses a mocked `op` binary; no
+1Password account, vault, or VM required. Exercises the actual activation
+script the module emits against all four secret types, with idempotent
+re-run and orphan-removal phases.
+
+```bash
+nix flake check
+# or, just the integration check:
+nix build .#checks.<system>.integration --no-link
+```
+
+This is the test loop for any change to `lib/`, `modules/`, or the
+activation script. It runs in CI on every PR.
+
+### VM integration test (opt-in real-API smoke)
+
+Drives a Parallels Ubuntu VM through cloud-init autoinstall, then runs
+`home-manager switch` against a real 1Password service account. Catches
+regressions in the real `op` CLI / cloud round-trip / activation
+lifecycle that the hermetic test can't see.
+
+```bash
+# Prerequisites: macOS + Parallels Pro/Business, Nix on host, op CLI v2+,
+# a service account token in .env (see .env.sample).
+./scripts/test-vm.sh
+```
+
+- **Linux / Home-Manager** path (automated): see `scripts/` and `tests/vm/`.
+- **macOS / nix-darwin** path (manual): [`docs/vm-testing-macos.md`](docs/vm-testing-macos.md).
+
+First base-VM build takes ~20 min; subsequent cycles are ~3–5 min via
+linked clones. Macs only — for non-macOS contributors the fast test above
+is the supported flow.
+
+## Known Limitations
+
+- Files written during a partial first run (before any successful run) are not tracked in
+  the manifest and must be manually removed.
+- Interactive `op signin` requires a TTY — use a service account token for scripts/CI.
+  System-level activation (nix-darwin) always requires a service account token.
+- Templates stored in the Nix store are world-readable; they must contain only `op://`
+  URI references, never literal secret values.
+</file>
+
+</files>
