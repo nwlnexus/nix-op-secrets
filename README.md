@@ -21,10 +21,10 @@ imports = [ inputs.op-secrets.hmModules.default ];
 
 ## Platform Support
 
-| Module | macOS | Linux |
-|--------|-------|-------|
-| `hmModules.default` | ✓ | ✓ |
-| `darwinModules.default` | ✓ | — |
+| Module                  | macOS | Linux |
+| ----------------------- | ----- | ----- |
+| `hmModules.default`     | ✓     | ✓     |
+| `darwinModules.default` | ✓     | —     |
 
 ## Auth
 
@@ -32,10 +32,55 @@ Activation uses `op` CLI with this precedence (module-level):
 
 1. `OP_SERVICE_ACCOUNT_TOKEN` in environment → used directly
 2. `serviceAccountTokenFile` option → token read from file
-3. `op whoami` succeeds → already authenticated (app agent or existing session)
-4. Fallback → `op signin` interactively (requires a TTY; system activation exits immediately instead)
+3. 1Password Connect credentials → `OP_CONNECT_HOST` + `OP_CONNECT_TOKEN`, or
+   `connectHost` + `connectTokenFile`
+4. `op whoami` succeeds → already authenticated (app agent or existing session)
+5. Per-secret auth overrides → each secret supplies its own account/token source
+6. Fallback → `op signin` interactively (requires a TTY; system activation
+   exits immediately instead)
 
-For headless Linux hosts: set `OP_SERVICE_ACCOUNT_TOKEN` or `serviceAccountTokenFile`.
+For headless hosts: use a service-account token or Connect credentials. System
+activation (`darwinModules.default`) cannot fall back to interactive signin.
+
+### Connect auth
+
+Use Connect when a self-hosted 1Password Connect server should serve activation
+requests instead of a service-account token:
+
+```nix
+op-secrets = {
+  enable = true;
+
+  # Both are required, and they are mutually exclusive with
+  # serviceAccountTokenFile.
+  connectHost = "https://op-connect.internal:8080";
+  connectTokenFile = "/run/secrets/op-connect-token";
+
+  secrets = {
+    "infra-env" = {
+      template = ./secrets/infra.env.tpl;
+      dest = "${config.home.homeDirectory}/projects/infra/.env";
+    };
+  };
+};
+```
+
+Runtime environment variables override the module values:
+
+```bash
+OP_CONNECT_HOST=https://op-connect.internal:8080
+OP_CONNECT_TOKEN=...
+```
+
+`OP_CONNECT_HOST` and `OP_CONNECT_TOKEN` are resolved independently, so one half
+may come from the environment while the other comes from module config. When
+service-account auth wins, activation unsets Connect env vars before invoking
+`op`; when Connect wins, activation unsets `OP_SERVICE_ACCOUNT_TOKEN`. This
+prevents the `op` CLI from seeing two auth modes at once.
+
+`serviceAccountTokenFile` is mutually exclusive with `connectHost` /
+`connectTokenFile`, and `connectHost` and `connectTokenFile` must be set
+together.
 
 ### Multi-account configs
 
@@ -60,6 +105,12 @@ supply a per-secret `serviceAccountTokenCommand` for each off-account secret.
 op-secrets = {
   enable  = true;
   account = "my.1password.com";  # optional for single-account users
+
+  # Optional headless auth. Use either service-account auth:
+  serviceAccountTokenFile = "/run/secrets/op-token";
+  # ...or Connect auth:
+  # connectHost = "https://op-connect.internal:8080";
+  # connectTokenFile = "/run/secrets/op-connect-token";
 
   secrets = {
     # SSH Key item (enforces 0600, optionally writes .pub in authorized_keys format)
@@ -94,6 +145,38 @@ op-secrets = {
   };
 };
 ```
+
+Multi-account example:
+
+```nix
+op-secrets = {
+  enable = true;
+  account = "personal.1password.com";
+  serviceAccountTokenFile = "/run/secrets/op-personal-token";
+
+  secrets = {
+    "personal-key" = {
+      type = "field";
+      source = "op://Private/GitHub/token";
+      dest = "${config.home.homeDirectory}/.config/github/token";
+    };
+
+    "work-key" = {
+      type = "field";
+      account = "work.1password.com";
+      serviceAccountTokenCommand = "cat /run/secrets/op-work-token";
+      source = "op://Employee/API/credential";
+      dest = "${config.home.homeDirectory}/.config/work/api-token";
+    };
+  };
+};
+```
+
+When any secret declares `account` or `serviceAccountTokenCommand`, the
+module-level auth probe becomes a soft check because per-secret auth will be
+applied during each fetch. Per-secret overrides affect `OP_ARGS` and
+`OP_SERVICE_ACCOUNT_TOKEN`; they do not swap Connect credentials per secret, so
+use service-account token commands for autonomous multi-account fetches.
 
 ## Options Reference
 
@@ -142,9 +225,11 @@ is the supported flow.
 
 ## Known Limitations
 
-- Files written during a partial first run (before any successful run) are not tracked in
-  the manifest and must be manually removed.
-- Interactive `op signin` requires a TTY — use a service account token for scripts/CI.
-  System-level activation (nix-darwin) always requires a service account token.
+- Files written during a partial first run (before any successful run) are not
+  tracked in the manifest and must be manually removed.
+- Interactive `op signin` requires a TTY — use a service-account token or
+  Connect credentials for scripts/CI. System-level activation (nix-darwin)
+  requires one of those non-interactive auth methods unless every fetch supplies
+  per-secret auth.
 - Templates stored in the Nix store are world-readable; they must contain only `op://`
   URI references, never literal secret values.
