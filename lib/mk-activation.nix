@@ -21,7 +21,7 @@ let
       sourceArg   = if secret.source   != null then secret.source   else "";
       vaultArg    = if secret.vault    != null then secret.vault    else "";
       itemArg     = if secret.item     != null then secret.item     else "";
-      templateArg = if secret.template != null then toString secret.template else "";
+      templateArg = if secret.template != null then "${secret.template}" else ""; # interpolate: copies the file into the store and keeps it in the activation closure (toString drops the dependency, so a GC removes it)
       accountArg  = if secret.account  != null then secret.account  else "";
       tokenCmdArg = if secret.serviceAccountTokenCommand != null
                     then secret.serviceAccountTokenCommand
